@@ -1,0 +1,202 @@
+{
+  "last_updated": "2025-07-27T16:10:34.495843",
+  "total_branches": 28,
+  "branches": {
+    "1": {
+      "name": "אום אלפחם",
+      "price_file": "PriceFull7290058108879-001-202507271024.gz",
+      "price_date": "729005810887",
+      "promo_file": "PromoFull7290058108879-001-202507271037.gz",
+      "promo_date": "729005810887"
+    },
+    "2": {
+      "name": "דבוריה",
+      "price_file": "PriceFull7290058108879-002-202507271024.gz",
+      "price_date": "729005810887",
+      "promo_file": "PromoFull7290058108879-002-202507271037.gz",
+      "promo_date": "729005810887"
+    },
+    "3": {
+      "name": "פרידיס",
+      "price_file": "PriceFull7290058108879-003-202507271024.gz",
+      "price_date": "729005810887",
+      "promo_file": "PromoFull7290058108879-003-202507271037.gz",
+      "promo_date": "729005810887"
+    },
+    "5": {
+      "name": "קלנסווה",
+      "price_file": "PriceFull7290058108879-005-202507271024.gz",
+      "price_date": "729005810887",
+      "promo_file": "PromoFull7290058108879-005-202507271038.gz",
+      "promo_date": "729005810887"
+    },
+    "6": {
+      "name": "שפרעם",
+      "price_file": "PriceFull7290058108879-006-202507271024.gz",
+      "price_date": "729005810887",
+      "promo_file": "PromoFull7290058108879-006-202507271038.gz",
+      "promo_date": "729005810887"
+    },
+    "7": {
+      "name": "סכנין",
+      "price_file": "PriceFull7290058108879-007-202507271024.gz",
+      "price_date": "729005810887",
+      "promo_file": "PromoFull7290058108879-007-202507271038.gz",
+      "promo_date": "729005810887"
+    },
+    "8": {
+      "name": "באר שבע",
+      "price_file": "PriceFull7290058108879-008-202507271024.gz",
+      "price_date": "729005810887",
+      "promo_file": "PromoFull7290058108879-008-202507271038.gz",
+      "promo_date": "729005810887"
+    },
+    "9": {
+      "name": "טמרה",
+      "price_file": "PriceFull7290058108879-009-202507271024.gz",
+      "price_date": "729005810887",
+      "promo_file": "PromoFull7290058108879-009-202507271039.gz",
+      "promo_date": "729005810887"
+    },
+    "10": {
+      "name": "דליית אל כרמל",
+      "price_file": "PriceFull7290058108879-010-202507271024.gz",
+      "price_date": "729005810887",
+      "promo_file": "PromoFull7290058108879-010-202507271039.gz",
+      "promo_date": "729005810887"
+    },
+    "12": {
+      "name": "נצרת",
+      "price_file": "PriceFull7290058108879-012-202507271024.gz",
+      "price_date": "729005810887",
+      "promo_file": "PromoFull7290058108879-012-202507271039.gz",
+      "promo_date": "729005810887"
+    },
+    "13": {
+      "name": "קאסם",
+      "price_file": "PriceFull7290058108879-013-202507271024.gz",
+      "price_date": "729005810887",
+      "promo_file": "PromoFull7290058108879-013-202507271040.gz",
+      "promo_date": "729005810887"
+    },
+    "14": {
+      "name": "כבאביר חיפה",
+      "price_file": "PriceFull7290058108879-014-202507271024.gz",
+      "price_date": "729005810887",
+      "promo_file": "PromoFull7290058108879-014-202507271040.gz",
+      "promo_date": "729005810887"
+    },
+    "15": {
+      "name": "כרמיאל",
+      "price_file": "PriceFull7290058108879-015-202507271024.gz",
+      "price_date": "729005810887",
+      "promo_file": "PromoFull7290058108879-015-202507271040.gz",
+      "promo_date": "729005810887"
+    },
+    "16": {
+      "name": "עכו",
+      "price_file": "PriceFull7290058108879-016-202507271024.gz",
+      "price_date": "729005810887",
+      "promo_file": "PromoFull7290058108879-016-202507271041.gz",
+      "promo_date": "729005810887"
+    },
+    "17": {
+      "name": "יפיע",
+      "price_file": "PriceFull7290058108879-017-202507271024.gz",
+      "price_date": "729005810887",
+      "promo_file": "PromoFull7290058108879-017-202507271041.gz",
+      "promo_date": "729005810887"
+    },
+    "18": {
+      "name": "יפת - יפו תל אביב",
+      "price_file": "PriceFull7290058108879-018-202507271024.gz",
+      "price_date": "729005810887",
+      "promo_file": "PromoFull7290058108879-018-202507271041.gz",
+      "promo_date": "729005810887"
+    },
+    "19": {
+      "name": "רמלה",
+      "price_file": "PriceFull7290058108879-019-202507271024.gz",
+      "price_date": "729005810887",
+      "promo_file": "PromoFull7290058108879-019-202507271042.gz",
+      "promo_date": "729005810887"
+    },
+    "27": {
+      "name": "בסמת טבעון",
+      "price_file": "PriceFull7290058108879-027-202507271024.gz",
+      "price_date": "729005810887",
+      "promo_file": "PromoFull7290058108879-027-202507271042.gz",
+      "promo_date": "729005810887"
+    },
+    "28": {
+      "name": "מיני קינגסטור רהט",
+      "price_file": "PriceFull7290058108879-028-202507271024.gz",
+      "price_date": "729005810887",
+      "promo_file": "PromoFull7290058108879-028-202507271042.gz",
+      "promo_date": "729005810887"
+    },
+    "31": {
+      "name": "צים סנטר נוף הגליל",
+      "price_file": "PriceFull7290058108879-031-202507271024.gz",
+      "price_date": "729005810887",
+      "promo_file": "PromoFull7290058108879-031-202507271042.gz",
+      "promo_date": "729005810887"
+    },
+    "50": {
+      "name": "אינטרנט",
+      "price_file": "",
+      "price_date": "",
+      "promo_file": "",
+      "promo_date": ""
+    },
+    "200": {
+      "name": "ירושליים",
+      "price_file": "PriceFull7290058108879-200-202507271024.gz",
+      "price_date": "729005810887",
+      "promo_file": "PromoFull7290058108879-200-202507271043.gz",
+      "promo_date": "729005810887"
+    },
+    "334": {
+      "name": "דיר חנא זכיינות",
+      "price_file": "PriceFull7290058108879-334-202507271024.gz",
+      "price_date": "729005810887",
+      "promo_file": "PromoFull7290058108879-334-202507271043.gz",
+      "promo_date": "729005810887"
+    },
+    "335": {
+      "name": "דוכאן כפר ברא",
+      "price_file": "PriceFull7290058108879-335-202507271024.gz",
+      "price_date": "729005810887",
+      "promo_file": "PromoFull7290058108879-335-202507271043.gz",
+      "promo_date": "729005810887"
+    },
+    "336": {
+      "name": "דוכאן קלנסווה",
+      "price_file": "PriceFull7290058108879-336-202507271024.gz",
+      "price_date": "729005810887",
+      "promo_file": "PromoFull7290058108879-336-202507271044.gz",
+      "promo_date": "729005810887"
+    },
+    "337": {
+      "name": "דוכאן אעבלין",
+      "price_file": "",
+      "price_date": "",
+      "promo_file": "",
+      "promo_date": ""
+    },
+    "338": {
+      "name": "דוכאן חי אלוורוד",
+      "price_file": "PriceFull7290058108879-338-202507271024.gz",
+      "price_date": "729005810887",
+      "promo_file": "PromoFull7290058108879-338-202507271044.gz",
+      "promo_date": "729005810887"
+    },
+    "339": {
+      "name": "יפו תלאביב מכללה",
+      "price_file": "PriceFull7290058108879-339-202507271024.gz",
+      "price_date": "729005810887",
+      "promo_file": "PromoFull7290058108879-339-202507271044.gz",
+      "promo_date": "729005810887"
+    }
+  }
+}

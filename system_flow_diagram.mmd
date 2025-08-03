@@ -1,0 +1,101 @@
+flowchart TD
+    %% SYSTEM STARTUP
+    Start([Flask Server Startup]) --> InitDB[Initialize Database<br/>database_setup.py<br/>FoodChainDatabase()]
+    InitDB --> CreateTables[Create Tables<br/>food_chains_metadata<br/>branches, products<br/>promotions, promotion_items]
+    CreateTables --> DiscoverChains[discover_and_store_food_chain_data()]
+    
+    %% FOOD CHAIN DISCOVERY
+    DiscoverChains --> GetAllChains[get_all_food_chains()<br/>Selenium: government website<br/>Extract 29 chains]
+    GetAllChains --> StoreChains[Store with placeholder codes<br/>CHAIN_001, CHAIN_002, etc.<br/>actual_chain_code: NULL]
+    
+    %% KINGSTORE DETAILED PROCESSING
+    StoreChains --> GetKingStore[get_food_chain_and_branches()<br/>Navigate to KingStore site<br/>Extract branch dropdown]
+    GetKingStore --> ExtractBranches[Extract 28 branches<br/>Branch codes + names<br/>Store in branch_dict]
+    ExtractBranches --> GetFiles[get_files_from_table()<br/>Scrape file table<br/>Find latest PriceFull + PromoFull]
+    GetFiles --> UpdateActual[update_actual_chain_code()<br/>CHAIN_001 → 7290058108879<br/>Update database]
+    UpdateActual --> StoreBranches[insert_branches()<br/>28 branches with file info<br/>Foreign key: CHAIN_001]
+    
+    %% API ENDPOINTS
+    StoreBranches --> ServerReady[🌐 Flask Server Ready<br/>Port 5000]
+    ServerReady --> API1[/food-chains<br/>GET all chains from DB]
+    ServerReady --> API2[/get-branches<br/>GET KingStore branches]
+    ServerReady --> API3[/status<br/>GET database status]
+    
+    %% DATABASE INTERACTIONS
+    subgraph Database["💾 SQLite Database (data/food_chains.db)"]
+        FoodChains[(food_chains_metadata<br/>29 rows<br/>CHAIN_001 has actual_chain_code)]
+        Branches[(branches<br/>28 KingStore branches<br/>price_file_name, promo_file_name)]
+        Products[(products<br/>EMPTY - ready for Phase 1)]
+        Promotions[(promotions<br/>EMPTY - ready for Phase 1)]
+        PromotionItems[(promotion_items<br/>EMPTY - ready for Phase 1)]
+    end
+    
+    %% WEB SCRAPING FLOW
+    subgraph WebScraping["🌐 Web Scraping (Selenium)"]
+        GovSite[Government Site<br/>https://www.gov.il/.../cpfta_prices_regulations]
+        KingSite[KingStore Site<br/>https://kingstore.binaprojects.com/Main.aspx]
+        FileTable[File Table<br/>Latest .gz files<br/>PriceFull + PromoFull]
+    end
+    
+    %% PHASE 1 PREPARATION (Next Steps)
+    subgraph Phase1Prep["🎯 Phase 1 Ready (Next Implementation)"]
+        DownloadFile[Download .gz file<br/>PriceFull7290058108879-001-*.gz]
+        DecompressFile[Decompress gzip<br/>Extract XML content]
+        ParseXML[Parse XML<br/>Extract product data<br/>ItemCode, ItemName, Price]
+        InsertProducts[Insert into products table<br/>~5K-15K products<br/>Chain: CHAIN_001, Branch: 001]
+    end
+    
+    %% CONNECTIONS
+    GetAllChains -.-> GovSite
+    GetKingStore -.-> KingSite
+    GetFiles -.-> FileTable
+    
+    StoreChains --> FoodChains
+    StoreBranches --> Branches
+    UpdateActual --> FoodChains
+    
+    API1 --> FoodChains
+    API2 --> Branches
+    API3 --> FoodChains
+    API3 --> Branches
+    
+    %% LOGGING SYSTEM
+    subgraph Logging["📝 Logging System"]
+        LogFile[python_backend.log<br/>Server activity<br/>Request tracking]
+        Console[Console Output<br/>Real-time feedback<br/>Progress indicators]
+    end
+    
+    DiscoverChains -.-> LogFile
+    GetAllChains -.-> Console
+    API1 -.-> LogFile
+    API2 -.-> LogFile
+    
+    %% ERROR HANDLING
+    subgraph ErrorHandling["⚠️ Error Handling"]
+        MissingFiles[Missing Files<br/>Branch 50, 337<br/>Log warnings]
+        SeleniumErrors[Selenium Timeouts<br/>Retry logic<br/>Graceful failures]
+        DatabaseErrors[SQLite Errors<br/>Constraint violations<br/>Rollback transactions]
+    end
+    
+    GetFiles --> MissingFiles
+    GetAllChains --> SeleniumErrors
+    StoreBranches --> DatabaseErrors
+    
+    %% NEXT IMPLEMENTATION (Phase 1)
+    DownloadFile --> DecompressFile
+    DecompressFile --> ParseXML
+    ParseXML --> InsertProducts
+    InsertProducts --> Products
+    
+    %% STYLING
+    classDef implemented fill:#e8f5e8,stroke:#2e7d32,stroke-width:2px
+    classDef database fill:#e3f2fd,stroke:#1565c0,stroke-width:2px
+    classDef api fill:#fff3e0,stroke:#ef6c00,stroke-width:2px
+    classDef nextPhase fill:#fce4ec,stroke:#c2185b,stroke-width:2px
+    classDef external fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px
+    
+    class Start,InitDB,CreateTables,DiscoverChains,GetAllChains,StoreChains,GetKingStore,ExtractBranches,GetFiles,UpdateActual,StoreBranches,ServerReady implemented
+    class FoodChains,Branches,Products,Promotions,PromotionItems database
+    class API1,API2,API3 api
+    class DownloadFile,DecompressFile,ParseXML,InsertProducts nextPhase
+    class GovSite,KingSite,FileTable external 

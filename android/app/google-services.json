@@ -1,0 +1,47 @@
+{
+  "project_info": {
+    "project_number": "846849731828",
+    "project_id": "smartsharedlist",
+    "storage_bucket": "smartsharedlist.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:846849731828:android:cc0a4a9f0a3fd1823102a1",
+        "android_client_info": {
+          "package_name": "com.saarInc.SmartSharedList"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "846849731828-fq65js9gbbaec5h52oann7c5do9api10.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.saarInc.SmartSharedList",
+            "certificate_hash": "6a3eb4e1585477e84ac859b8e0cce71bcf9bd2fd"
+          }
+        },
+        {
+          "client_id": "846849731828-e16uligv0rdbja1p6inq4rjenjbba561.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyClv7lerpIizpMEoUjeavo52n21BKJTOwE"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "846849731828-e16uligv0rdbja1p6inq4rjenjbba561.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
