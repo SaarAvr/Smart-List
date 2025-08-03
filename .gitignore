@@ -72,6 +72,12 @@ Thumbs.db
 build/
 *.lock
 
+# Flutter build files
+**/build/
+**/android/build/
+**/ios/build/
+**/web/build/
+
 # Android
 **/android/gradlew
 **/android/gradlew.bat
