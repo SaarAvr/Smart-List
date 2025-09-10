@@ -1,68 +1,122 @@
-from flask import Flask, jsonify
+from flask import Flask, jsonify, render_template_string
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from flask import jsonify
-import zipfile
-import datetime
+from selenium.webdriver.chrome.options import Options
+import sqlite3
 import os
-import json
 import gzip
-import io
+import xml.etree.ElementTree as ET
+from datetime import datetime
 import time
-from database_setup import FoodChainDatabase
-from database_hierarchical import HierarchicalFoodDatabase
+import requests
+from database import FoodChainDatabase
 
 app = Flask(__name__)
 
-# Configure Flask to use compact JSON (no pretty printing)
-app.config['JSONIFY_PRETTYPRINT_REGULAR'] = False
-
 # Global database instance
 db = FoodChainDatabase()
-hierarchical_db = HierarchicalFoodDatabase()
-data_directory = "data"
 
 def log_message(message):
-    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    """Log a message with timestamp"""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{timestamp}] {message}")
 
 def ensure_data_directory():
-    """Create data directory if it doesn't exist"""
-    if not os.path.exists(data_directory):
-        os.makedirs(data_directory)
-        log_message(f"📁 Created data directory: {data_directory}")
+    """Ensure the data directory exists"""
+    os.makedirs("data", exist_ok=True)
 
-def get_all_food_chains():
-    """
-    Extract all food chains from the government website
-    """
-    from selenium import webdriver
-    from selenium.webdriver.common.by import By
-    from selenium.webdriver.support.ui import WebDriverWait
-    from selenium.webdriver.support import expected_conditions as EC
-    from selenium.webdriver.chrome.service import Service
-    from webdriver_manager.chrome import ChromeDriverManager
+def create_driver():
+    """Create and configure Chrome driver"""
+    chrome_options = Options()
+    chrome_options.add_argument("--headless")
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--disable-gpu")
+    chrome_options.add_argument("--window-size=1920,1080")
+    chrome_options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+    
+    # Set download directory
+    download_dir = "/Users/saar/repos/CursorProjects/smart_shared_list/branchesFiles"
+    os.makedirs(download_dir, exist_ok=True)
+    
+    # Force download directory with command line arguments
+    chrome_options.add_argument(f"--download-directory={download_dir}")
+    chrome_options.add_argument("--disable-web-security")
+    chrome_options.add_argument("--allow-running-insecure-content")
+    
+    prefs = {
+        "download.default_directory": download_dir,
+        "download.prompt_for_download": False,
+        "download.directory_upgrade": True,
+        "safebrowsing.enabled": True,
+        "profile.default_content_setting_values.automatic_downloads": 1,
+        "profile.default_content_settings.popups": 0,
+        "profile.managed_default_content_settings.images": 2,
+        "profile.content_settings.exceptions.automatic_downloads.*.setting": 1
+    }
+    chrome_options.add_experimental_option("prefs", prefs)
+    
+    return webdriver.Chrome(options=chrome_options)
 
-    options = webdriver.ChromeOptions()
-    options.add_argument("--headless")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+@app.route('/')
+def home():
+    """Home page with links to all endpoints"""
+    return jsonify({
+        "message": "Food Chain Data Server",
+        "endpoints": {
+            "database_status": "/status",
+            "phase1": "/phase1 - Discover food chains",
+            "phase2": "/phase2 - Discover branches for KingStore",
+            "phase3": "/phase3 - Download and process files",
+            "update_file_names": "/update-file-names - Update file names for all branches",
+            "update": "/update - Complete database update (file names + download + process + cleanup)",
+            "food_chains": "/food-chains",
+            "branches": "/branches/<chain_code>",
+            "viewer": "/viewer"
+        }
+    })
 
+@app.route('/status')
+def status():
+    """Get database status"""
+    status_info = db.get_database_status()
+    return jsonify(status_info)
+
+@app.route('/phase1')
+def phase1():
+    """Phase 1: Discover all food chains from root URL"""
     try:
-        log_message("📡 Scanning all food chains from government website...")
+        log_message("🚀 Starting Phase 1: Food Chain Discovery...")
+        
+        # Check if database exists, create if not
+        if not db.database_exists():
+            log_message("📊 Creating new database...")
+            db.initialize_database()
+        
+        # Create driver and navigate to the correct government page
+        driver = create_driver()
         driver.get("https://www.gov.il/he/pages/cpfta_prices_regulations")
+        
+        # Wait for table to load
         WebDriverWait(driver, 20).until(
             EC.presence_of_element_located((By.CSS_SELECTOR, "tbody tr"))
         )
+        
+        # Find all table rows containing food chain data
         rows = driver.find_elements(By.CSS_SELECTOR, "tbody tr")
         if not rows:
             log_message("❌ ERROR: No chain rows found")
             driver.quit()
-            return []
-
+            return jsonify({
+                "status": "error",
+                "error": "No food chain rows found on government website"
+            })
+        
         log_message(f"✅ Found {len(rows)} food chain rows on government site")
         
-        food_chains = []
+        discovered_chains = []
         
         for i, row in enumerate(rows):
             try:
@@ -77,90 +131,72 @@ def get_all_food_chains():
                     # Extract chain name from the LEFTMOST column (Cell 0)
                     chain_name = row_cells[0].text.strip()
                     
-                    # Basic validation - just check link text and ensure we have name and URL
+                    # Basic validation - check link text and ensure we have name and URL
                     if "לצפי" not in link_text:
                         log_message(f"⏭️  Skipping row {i+1}: Link text doesn't contain 'לצפי' (got: '{link_text}')")
                         continue
                     
                     # Sequential chain code for all discovered chains
-                    chain_code = f"CHAIN_{len(food_chains)+1:03d}"
+                    chain_code = f"CHAIN_{len(discovered_chains)+1:03d}"
                     
                     if chain_name and chain_url:
-                        food_chains.append({
+                        db.add_food_chain(chain_code, chain_name, chain_url)
+                        discovered_chains.append({
                             "code": chain_code,
                             "name": chain_name,
                             "url": chain_url
                         })
-                        log_message(f"🏢 Chain {len(food_chains)}: {chain_name}")
+                        log_message(f"   ✅ Discovered: {chain_name} ({chain_code})")
                         
             except Exception as e:
                 log_message(f"⚠️  Warning: Could not extract chain {i+1}: {str(e)}")
                 continue
         
-        log_message(f"📊 Successfully extracted {len(food_chains)} food chains")
-        return food_chains
+        if not discovered_chains:
+            log_message("⚠️ No food chains found on the government website")
+        
+        driver.quit()
+        
+        log_message(f"✅ Phase 1 Complete: Discovered {len(discovered_chains)} food chains")
+        
+        return jsonify({
+            "status": "success",
+            "phase": 1,
+            "food_chains_discovered": len(discovered_chains),
+            "food_chains": discovered_chains
+        })
         
     except Exception as e:
-        log_message(f"❌ ERROR getting food chains: {str(e)}")
-        return []
-    finally:
-        driver.quit()
+        log_message(f"❌ Phase 1 failed: {str(e)}")
+        return jsonify({
+            "status": "error",
+            "error": str(e)
+        })
 
-
-def get_food_chain_and_branches():
-    """Get food chain metadata and all branches from the dropdown"""
-    log_message("🚀 Starting food chain and branch discovery...")
-    
-    from selenium import webdriver
-    from selenium.webdriver.chrome.service import Service
-    from selenium.webdriver.common.by import By
-    from selenium.webdriver.support.ui import WebDriverWait
-    from selenium.webdriver.support import expected_conditions as EC
-    from webdriver_manager.chrome import ChromeDriverManager
-
-    options = webdriver.ChromeOptions()
-    options.add_argument("--headless")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
-
+@app.route('/phase2')
+def phase2():
+    """Phase 2: Discover branches for KingStore (first food chain)"""
     try:
-        log_message("📡 Navigating to government website...")
-        driver.get("https://www.gov.il/he/pages/cpfta_prices_regulations")
-        WebDriverWait(driver, 20).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "tbody tr"))
-        )
-        rows = driver.find_elements(By.CSS_SELECTOR, "tbody tr")
-        if not rows:
-            log_message("❌ ERROR: No chain rows found")
-            driver.quit()
-            return {}, "", None
-
-        log_message(f"✅ Found {len(rows)} food chain rows on government site")
+        log_message("🚀 Starting Phase 2: Branch Discovery for KingStore...")
         
-        # Get first food chain information
-        first_row = rows[0]
-        first_link = first_row.find_element(By.TAG_NAME, "a")
-        chain_url = first_link.get_attribute("href")
+        # Get KingStore from database
+        food_chains = db.get_all_food_chains()
+        if not food_chains:
+            return jsonify({
+                "status": "error",
+                "error": "No food chains found. Run Phase 1 first."
+            })
         
-        # Get actual food chain name from the leftmost column (not the link text)
-        row_cells = first_row.find_elements(By.TAG_NAME, "td")
-        chain_name_element = row_cells[0].text.strip() if row_cells else "KingStore"
-        
-        # Extract chain code from URL or other means (KingStore specific)
-        # For KingStore, we know the chain code from the file patterns
-        chain_code = "7290058108879"  # This will be extracted dynamically later
-        
-        chain_info = {
-            "code": chain_code,
-            "name": chain_name_element or "KingStore",  # Fallback to KingStore
-            "url": chain_url
-        }
-        
-        log_message(f"🏢 Food Chain: {chain_info['name']} (Code: {chain_info['code']})")
+        # Focus on first food chain (KingStore)
+        chain_code, chain_name, chain_url = food_chains[0]
+        log_message(f"📊 Processing: {chain_name} ({chain_code})")
         log_message(f"🔗 Chain URL: {chain_url}")
-
-        log_message("📊 Loading chain page and waiting for branch dropdown...")
+        
+        # Create branches table for this chain
+        db.create_branches_table(chain_code)
+        
+        # Create driver and navigate to food chain URL
+        driver = create_driver()
         driver.get(chain_url)
         
         # Wait for the warehouse dropdown to be populated
@@ -176,9 +212,11 @@ def get_food_chain_and_branches():
             except Exception as e:
                 log_message(f"⚠️  Attempt {attempt + 1} failed: {str(e)}")
                 time.sleep(1)
-
+        
         log_message("🏪 Extracting branch information from dropdown...")
+        discovered_branches = []
         branch_dict = {}
+        
         for option in options_list:
             code = option.get_attribute("value").strip()
             name = option.text.strip()
@@ -186,659 +224,418 @@ def get_food_chain_and_branches():
                 # Remove the code prefix from the name (e.g., "1 אום אלפחם" -> "אום אלפחם")
                 clean_name = name.split(' ', 1)[1] if ' ' in name else name
                 branch_dict[code] = clean_name
-                log_message(f"   ✅ Found branch: {clean_name} (Code: {code})")
-
-        driver.quit()
-        log_message(f"🎉 SUCCESS: Found {len(branch_dict)} branches from {chain_info['name']}!")
-        return branch_dict, chain_url, chain_info
-        
-    except Exception as e:
-        driver.quit()
-        log_message(f"❌ ERROR during food chain discovery: {str(e)}")
-        return {}, "", None
-
-def get_files_from_table(chain_url):
-    """Get latest files for each branch from the data table - DEBUG VERSION"""
-    log_message("🔍 Starting file discovery from data table...")
-    
-    from selenium import webdriver
-    from selenium.webdriver.chrome.service import Service
-    from selenium.webdriver.common.by import By
-    from selenium.webdriver.support.ui import WebDriverWait
-    from webdriver_manager.chrome import ChromeDriverManager
-    import re
-
-    options = webdriver.ChromeOptions()
-    options.add_argument("--headless")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
-
-    try:
-        log_message(f"📡 Navigating to chain URL: {chain_url}")
-        driver.get(chain_url)
-        
-        # Wait for the file table to be populated
-        WebDriverWait(driver, 30).until(
-            lambda d: any(len(row.find_elements(By.TAG_NAME, "td")) > 0 for row in d.find_elements(By.CSS_SELECTOR, "table#myTable tr"))
-        )
-        chain_rows = driver.find_elements(By.CSS_SELECTOR, "table#myTable tr")
-        log_message(f"✅ Found {len(chain_rows)} file entries in table")
-
-        branch_files = {}
-        
-        # Debug: Check first few rows to see the data structure
-        log_message("🔍 DEBUG: Examining first 5 rows of file table...")
-        for i, row in enumerate(chain_rows[:5]):
-            cells = row.find_elements(By.TAG_NAME, "td")
-            if len(cells) >= 2:
-                file_name = cells[0].text.strip()
-                branch_code_full = cells[1].text.strip()
-                branch_code_numeric = branch_code_full.split(' ', 1)[0] if ' ' in branch_code_full else branch_code_full
-                log_message(f"   Row {i+1}: FileName='{file_name}' | Full='{branch_code_full}' | Numeric='{branch_code_numeric}'")
-
-        for row in chain_rows:
-            cells = row.find_elements(By.TAG_NAME, "td")
-            if len(cells) < 5:
-                continue
-            file_name = cells[0].text.strip()
-            branch_code_full = cells[1].text.strip()
-            
-            # Skip empty or invalid entries
-            if not file_name or not branch_code_full:
-                continue
-            
-            # Extract just the numeric code from "339 יפו תלאביב מכללה" -> "339"
-            branch_code = branch_code_full.split(' ', 1)[0] if ' ' in branch_code_full else branch_code_full
-            
-            # Debug specific branches that are missing
-            if branch_code in ['337', '50']:
-                log_message(f"🔍 DEBUG: Processing missing branch {branch_code} | File: {file_name}")
                 
-            # Extract date from end of filename: PriceFull7290058108879-001-202507271024.gz -> 202507271024
-            match = re.search(r'-(\d{12})\.gz$', file_name)
-            file_date = match.group(1) if match else ""
-            
-            if "PriceFull" in file_name:
-                file_type = "PriceFull"
-            elif "PromoFull" in file_name:
-                file_type = "PromoFull"
-            else:
-                if branch_code in ['337', '50']:
-                    log_message(f"🔍 DEBUG: Branch {branch_code} file skipped - not PriceFull/PromoFull: {file_name}")
-                continue
-
-            key = f"{branch_code}"
-            if key not in branch_files:
-                branch_files[key] = {"PriceFull": ("", ""), "PromoFull": ("", "")}
-            
-            if file_type == "PriceFull" and file_date > branch_files[key]["PriceFull"][1]:
-                branch_files[key]["PriceFull"] = (file_name, file_date)
-                log_message(f"   📄 Updated PriceFull for branch {branch_code} (from '{branch_code_full}'): {file_name}")
-            if file_type == "PromoFull" and file_date > branch_files[key]["PromoFull"][1]:
-                branch_files[key]["PromoFull"] = (file_name, file_date)
-                log_message(f"   🎯 Updated PromoFull for branch {branch_code} (from '{branch_code_full}'): {file_name}")
-
+                # Add to database
+                db.add_branch(chain_code, code, clean_name)
+                discovered_branches.append({
+                    "code": code,
+                    "name": clean_name
+                })
+                log_message(f"   ✅ Discovered branch: {clean_name} (Code: {code})")
+        
         driver.quit()
-        log_message(f"📁 Found files for {len(branch_files)} branches")
         
-        # Debug: Show the extracted branch codes we're using as keys
-        branch_codes = list(branch_files.keys())[:10]  # First 10 for brevity
-        log_message(f"🔍 DEBUG: File table branch codes (first 10): {branch_codes}")
-        
-        # Debug: Check specifically for missing branches 337 and 50
-        missing_branches = []
-        for check_branch in ['337', '50']:
-            if check_branch not in branch_files:
-                missing_branches.append(check_branch)
-        
-        if missing_branches:
-            log_message(f"🔍 DEBUG: Branches completely missing from file table: {missing_branches}")
-        
-        return branch_files
-        
-    except Exception as e:
-        driver.quit()
-        log_message(f"❌ ERROR during file discovery: {str(e)}")
-        return {}
-
-def discover_and_store_food_chain_data():
-    """Main function to discover food chain, branches, and store in database"""
-    global db
-    
-    log_message("🚀 Starting comprehensive food chain discovery and database population...")
-    
-    # Step 1: Get ALL food chains from government website
-    log_message("📊 Phase 1: Discovering all food chains...")
-    all_food_chains = get_all_food_chains()
-    
-    if not all_food_chains:
-        log_message("❌ Failed to discover any food chains")
-        return
-    
-    # Step 2: Store all food chain metadata in database
-    log_message(f"💾 Storing metadata for {len(all_food_chains)} food chains...")
-    for chain in all_food_chains:
-        try:
-            db.add_food_chain(chain['code'], chain['name'], chain['url'])
-            log_message(f"   ✅ Stored: {chain['name']}")
-        except Exception as e:
-            log_message(f"   ⚠️  Warning: Failed to store {chain['name']}: {str(e)}")
-    
-    log_message("🎉 All food chains stored in database!")
-    
-    # Step 3: Get detailed branch data for KingStore only (to avoid processing all chains)
-    log_message("📊 Phase 2: Getting detailed branch data for KingStore...")
-    branch_dict, chain_url, chain_info = get_food_chain_and_branches()
-    
-    if not branch_dict or not chain_info:
-        log_message("❌ Failed to get detailed KingStore data, but all chains are stored")
-        return
-    
-    # Step 4: Find KingStore's placeholder code and update it with actual chain code
-    log_message(f"💾 Updating KingStore placeholder with actual chain code...")
-    
-    # Find KingStore in the stored chains (should be CHAIN_001 since it's first)
-    kingstore_placeholder = None
-    for chain in all_food_chains:
-        if "קינג סטור" in chain['name'] or "kingstore" in chain['url'].lower():
-            kingstore_placeholder = chain['code']
-            break
-    
-    if kingstore_placeholder:
-        # Update the existing entry with actual chain code
-        success = db.update_actual_chain_code(kingstore_placeholder, chain_info['code'])
-        if success:
-            log_message(f"✅ Updated {kingstore_placeholder} with actual code: {chain_info['code']}")
+        if not discovered_branches:
+            log_message("⚠️ No branches found on the food chain website")
         else:
-            log_message(f"⚠️ Failed to update KingStore placeholder code")
-    else:
-        log_message(f"⚠️ Could not find KingStore placeholder in stored chains")
-    
-    # Step 5: Get file information for branches
-    branch_files = get_files_from_table(chain_url)
-    
-    # Step 6: Combine branch data with file information
-    log_message("🔧 Preparing branch data for database...")
-    branches_for_db = {}
-    
-    for branch_code, branch_name in branch_dict.items():
-        files_info = branch_files.get(branch_code, {"PriceFull": ("", ""), "PromoFull": ("", "")})
-        branches_for_db[branch_code] = {
-            "name": branch_name,
-            "price_file": files_info["PriceFull"][0],
-            "price_date": files_info["PriceFull"][1],
-            "promo_file": files_info["PromoFull"][0],
-            "promo_date": files_info["PromoFull"][1]
-        }
+            log_message(f"🎉 SUCCESS: Found {len(discovered_branches)} branches from {chain_name}!")
         
-        # Log file status for each branch
-        price_status = "✅" if files_info["PriceFull"][0] else "❌"
-        promo_status = "✅" if files_info["PromoFull"][0] else "❌"
-        log_message(f"   🏪 {branch_code}: {branch_name} | Price: {price_status} | Promo: {promo_status}")
-
-    # Step 7: Store all branch data in database (using placeholder code for foreign key consistency)
-    log_message(f"💾 Storing {len(branches_for_db)} branches in database...")
-    chain_code_for_branches = kingstore_placeholder if kingstore_placeholder else chain_info['code']
-    db.insert_branches(chain_code_for_branches, branches_for_db)
-    
-    # Step 8: Show database status
-    status = db.get_database_status()
-    log_message(f"🎉 SUCCESS: Database populated!")
-    for chain_code, info in status["chains"].items():
-        log_message(f"  📊 Chain {chain_code}: {info['name']} - {info['branches']} branches stored")
-    
-    log_message(f"📁 Database location: {db.db_path}")
-
-@app.route('/get-branches')
-def get_branches():
-    """Return the list of all branches from database"""
-    log_message("🔥 NEW REQUEST: /get-branches")
-    
-    try:
-        # Get branches from database
-        conn = db.db.connect() if hasattr(db, 'db') else None
-        if not conn:
-            import sqlite3
-            conn = sqlite3.connect(db.db_path)
+        log_message(f"✅ Phase 2 Complete: Discovered {len(discovered_branches)} branches for {chain_name}")
         
-        cursor = conn.cursor()
-        cursor.execute('''
-            SELECT b.branch_code, b.branch_name, b.price_file_name, b.price_file_date,
-                   b.promo_file_name, b.promo_file_date, b.price_file_status, b.promo_file_status
-            FROM branches b
-            ORDER BY CAST(b.branch_code AS INTEGER)
-        ''')
-        
-        rows = cursor.fetchall()
-        conn.close()
-        
-        if not rows:
-            log_message("❌ No branch data available in database!")
-            return jsonify({"error": "No branch data available. Server may still be initializing."})
-        
-        # Convert to list of objects
-        branches_list = [{
-            "code": row[0],
-            "name": row[1],
-            "price_file": row[2] or "",
-            "price_date": row[3] or "",
-            "promo_file": row[4] or "",
-            "promo_date": row[5] or "",
-            "price_status": row[6],
-            "promo_status": row[7]
-        } for row in rows]
-    
-        log_message(f"📤 Returning {len(branches_list)} branches from database (sorted by code)")
-        
-        import json
-        from flask import Response
-        
-        # Custom formatting: compact but with each branch object on its own line
-        json_str = '{\n  "branches": [\n'
-        for i, branch in enumerate(branches_list):
-            comma = "," if i < len(branches_list) - 1 else ""
-            json_str += f'    {json.dumps(branch, ensure_ascii=False)}{comma}\n'
-        json_str += f'  ],\n  "total_branches": {len(branches_list)}\n}}'
-        
-        return Response(json_str, mimetype='application/json')
-        
-    except Exception as e:
-        log_message(f"❌ ERROR serving branches from database: {str(e)}")
-        return jsonify({"error": f"Database error: {str(e)}"})
-
-@app.route('/food-chains')
-def get_food_chains():
-    """Return all food chains from database"""
-    log_message("🔥 NEW REQUEST: /food-chains")
-    
-    try:
-        import sqlite3
-        conn = sqlite3.connect(db.db_path)
-        cursor = conn.cursor()
-        
-        cursor.execute("""
-            SELECT chain_code, chain_name, chain_url, created_at 
-            FROM food_chains_metadata 
-            ORDER BY chain_name
-        """)
-        
-        chains = []
-        for row in cursor.fetchall():
-            chains.append({
-                "code": row[0],
-                "name": row[1], 
-                "url": row[2],
-                "created_at": row[3]
-            })
-        
-        conn.close()
-        log_message(f"📊 Retrieved {len(chains)} food chains")
         return jsonify({
-            "total_chains": len(chains),
-            "chains": chains
+            "status": "success",
+            "phase": 2,
+            "chain_processed": chain_name,
+            "branches_discovered": len(discovered_branches),
+            "branches": discovered_branches
         })
         
     except Exception as e:
-        log_message(f"❌ ERROR getting food chains: {str(e)}")
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route('/status')
-def status():
-    """Show server status and database info"""
-    try:
-        db_status = db.get_database_status()
-        return jsonify({
-            "status": "running",
-            "database": db_status,
-            "data_directory": data_directory
-        })
-    except Exception as e:
+        log_message(f"❌ Phase 2 failed: {str(e)}")
         return jsonify({
             "status": "error",
-            "error": str(e),
-            "data_directory": data_directory
+            "error": str(e)
         })
 
-# ============================================================================
-# HIERARCHICAL DATABASE ENDPOINTS FOR HTML VIEWER
-# ============================================================================
-
-@app.route('/hierarchical-overview')
-def get_hierarchical_overview():
-    """Get complete hierarchical database overview"""
+@app.route('/phase3')
+def phase3():
+    """Phase 3: Download and process files for all branches"""
     try:
-        overview = hierarchical_db.get_database_overview()
-        return jsonify(overview)
-    except Exception as e:
-        return jsonify({
-            "error": f"Failed to get database overview: {str(e)}"
-        })
-
-@app.route('/hierarchical-chain/<chain_code>')
-def get_chain_branches(chain_code):
-    """Get all branches for a specific chain"""
-    try:
-        import sqlite3
-        conn = sqlite3.connect(hierarchical_db.db_path)
-        cursor = conn.cursor()
+        log_message("🚀 Starting Phase 3: File Download and Processing...")
         
-        # Get branches for this chain
-        branches_table = f"chain_{chain_code}_branches"
-        cursor.execute(f'''
-            SELECT branch_code, branch_name, price_file_name, promo_file_name, 
-                   price_file_date, promo_file_date, address, coordinates
-            FROM {branches_table} 
-            ORDER BY CAST(branch_code AS INTEGER)
-        ''')
-        
-        branches_raw = cursor.fetchall()
-        branches = []
-        
-        for row in branches_raw:
-            branches.append({
-                "branch_code": row[0],
-                "branch_name": row[1],
-                "price_file_name": row[2],
-                "promo_file_name": row[3],
-                "price_file_date": row[4],
-                "promo_file_date": row[5],
-                "address": row[6],
-                "coordinates": row[7]
+        # Get all food chains from database
+        food_chains = db.get_all_food_chains()
+        if not food_chains:
+            return jsonify({
+                "status": "error",
+                "error": "No food chains found. Run Phase 1 first."
             })
         
-        conn.close()
+        total_processed = 0
+        chain_results = []
         
-        return jsonify({
-            "chain_code": chain_code,
-            "branches": branches
-        })
+        # For now, focus on first food chain (KingStore)
+        chain_code, chain_name, chain_url = food_chains[0]
+        log_message(f"📊 Processing chain: {chain_name} ({chain_code})")
         
-    except Exception as e:
-        return jsonify({
-            "error": f"Failed to get branches for {chain_code}: {str(e)}"
-        })
-
-@app.route('/hierarchical-viewer')
-def serve_hierarchical_viewer():
-    """Serve the hierarchical database viewer HTML page"""
-    try:
-        with open('hierarchical_viewer.html', 'r', encoding='utf-8') as f:
-            html_content = f.read()
-        return html_content
-    except Exception as e:
-        return f"Error loading viewer: {str(e)}", 500
-
-@app.route('/hierarchical-branch/<chain_code>/<branch_code>')
-def get_branch_products(chain_code, branch_code):
-    """Get products for a specific branch"""
-    try:
-        import sqlite3
-        conn = sqlite3.connect(hierarchical_db.db_path)
-        cursor = conn.cursor()
-        
-        # Get branch metadata
-        products_table = f"branch_{chain_code}_{branch_code}_products"
-        metadata_table = f"{products_table}_metadata"
-        
-        cursor.execute(f'SELECT * FROM {metadata_table} WHERE id = 1')
-        metadata_raw = cursor.fetchone()
-        
-        metadata = {}
-        if metadata_raw:
-            metadata = {
-                "chain_code": metadata_raw[1],
-                "branch_code": metadata_raw[2],
-                "branch_name": metadata_raw[3],
-                "latest_price_file": metadata_raw[4],
-                "latest_promo_file": metadata_raw[5],
-                "total_products": metadata_raw[6],
-                "last_update": metadata_raw[7],
-                "total_promotions": metadata_raw[9] if len(metadata_raw) > 9 else 0
-            }
-        
-        # Get top 50 products by price
-        cursor.execute(f'''
-            SELECT item_code, item_name, manufacturer_name, item_price, 
-                   unit_of_measure, quantity, price_update_date
-            FROM {products_table} 
-            ORDER BY CAST(item_price AS REAL) DESC 
-            LIMIT 50
-        ''')
-        
-        products_raw = cursor.fetchall()
-        products = []
-        
-        for row in products_raw:
-            products.append({
-                "item_code": row[0],
-                "item_name": row[1],
-                "manufacturer_name": row[2],
-                "item_price": row[3],
-                "unit_of_measure": row[4],
-                "quantity": row[5],
-                "price_update_date": row[6]
-            })
-        
-        # Get top 50 promotions by discounted price
-        promotions_table = f"branch_{chain_code}_{branch_code}_promotions"
-        promotion_items_table = f"branch_{chain_code}_{branch_code}_promotion_items"
-        promotions = []
-        
+        # Get all branches for this chain
         try:
-            cursor.execute(f'''
-                SELECT p.promotion_id, p.promotion_description, p.discounted_price, 
-                       p.min_quantity, p.promotion_end_date, p.promotion_start_date,
-                       p.max_quantity, p.discounted_price_per_unit
-                FROM {promotions_table} p
-                ORDER BY CAST(p.discounted_price AS REAL) DESC 
-                LIMIT 50
-            ''')
-            
-            promotions_raw = cursor.fetchall()
-            
-            for row in promotions_raw:
-                promotion_id = row[0]
-                
-                # Get items for this promotion
-                cursor.execute(f'''
-                    SELECT item_code FROM {promotion_items_table}
-                    WHERE promotion_id = ?
-                ''', (promotion_id,))
-                
-                items_raw = cursor.fetchall()
-                item_codes = [item[0] for item in items_raw]
-                
-                promotions.append({
-                    "promotion_id": promotion_id,
-                    "promotion_description": row[1],
-                    "discounted_price": row[2],
-                    "min_quantity": row[3],
-                    "promotion_end_date": row[4],
-                    "promotion_start_date": row[5],
-                    "max_quantity": row[6],
-                    "discounted_price_per_unit": row[7],
-                    "item_codes": item_codes,
-                    "item_count": len(item_codes)
+            branches = db.get_branches(chain_code)
+            if not branches:
+                return jsonify({
+                    "status": "error",
+                    "error": f"No branches found for {chain_name}. Run Phase 2 first."
                 })
-        except sqlite3.Error as e:
-            # Promotions table might not exist yet
-            print(f"Promotions query error: {str(e)}")
+        except Exception as e:
+            return jsonify({
+                "status": "error",
+                "error": f"No branch table exists for {chain_name}. Run Phase 2 first."
+            })
+        
+        log_message(f"🏪 Found {len(branches)} branches for {chain_name}")
+        
+        branch_results = []
+
+        # Prepare a single driver and index the chain table once
+        driver = create_driver()
+        driver.get(chain_url)
+        WebDriverWait(driver, 30).until(
+            lambda d: any(len(row.find_elements(By.TAG_NAME, "td")) > 0 
+                          for row in d.find_elements(By.CSS_SELECTOR, "table#myTable tr"))
+        )
+
+        rows = driver.find_elements(By.CSS_SELECTOR, "table#myTable tr")
+        log_message(f"📄 Indexed {len(rows)} rows from chain table")
+
+        # Get file names from database (no need to scan entire table)
+        log_message("📋 Getting file names from database...")
+
+        # Helper to wait for a file to appear (check both directories)
+        def wait_for_file(path, timeout_seconds=90):
+            start = time.time()
+            system_downloads = os.path.expanduser("~/Downloads")
+            filename = os.path.basename(path)
+            system_path = os.path.join(system_downloads, filename)
+            
+            while time.time() - start < timeout_seconds:
+                # Check our target directory first
+                if os.path.exists(path):
+                    return True
+                # Check system Downloads directory
+                if os.path.exists(system_path):
+                    log_message(f"   📁 Found file in system Downloads, moving to {path}")
+                    try:
+                        import shutil
+                        shutil.move(system_path, path)
+                        return True
+                    except Exception as e:
+                        log_message(f"   ❌ Error moving file: {e}")
+                        return False
+                time.sleep(1)
+            return False
+
+        # Ensure download dir
+        download_dir = os.path.abspath("branchesFiles")
+        os.makedirs(download_dir, exist_ok=True)
+
+        for branch_code, branch_name, price_file_name, promo_file_name in branches:
+            try:
+                log_message(f"📦 Processing branch {branch_code}: {branch_name}")
+
+                # Skip if no file names available
+                if not price_file_name and not promo_file_name:
+                    log_message(f"   ⚠️ No file names available for branch {branch_code}, skipping...")
+                    continue
+
+                # Create tables for this branch
+                db.create_products_table(chain_code, branch_code)
+                db.create_promotions_table(chain_code, branch_code)
+                
+                # Clear existing data to avoid constraint conflicts
+                log_message(f"   🧹 Clearing existing data for branch {branch_code}")
+                db.clear_branch_data(chain_code, branch_code)
+                
+                branch_processed = 0
+
+                # Download and process PriceFull file (strict)
+                actual_price_file = None
+                if price_file_name and "PriceFull" in price_file_name:
+                    log_message(f"   🔍 Looking for price file: {price_file_name}")
+                    expected_path = os.path.join(download_dir, price_file_name)
+                    
+                    # Find the row containing this file and extract the button
+                    file_found = False
+                    for row in rows:
+                        cells = row.find_elements(By.TAG_NAME, "td")
+                        if len(cells) < 6:
+                            continue
+                        row_file_name = cells[0].text.strip()
+                        if row_file_name == price_file_name:
+                            log_message(f"   ✅ Found file in table: {price_file_name}")
+                            # Extract download button from this row
+                            download_buttons = cells[5].find_elements(By.TAG_NAME, "button")
+                            if download_buttons:
+                                btn = download_buttons[0]
+                                log_message(f"   🖱️ Clicking download for {price_file_name}")
+                                driver.execute_script("arguments[0].click();", btn)
+                                if wait_for_file(expected_path):
+                                    log_message(f"   📄 Processing price file: {expected_path}")
+                                    products_processed = process_price_file(chain_code, branch_code, expected_path)
+                                    branch_processed += products_processed
+                                    actual_price_file = price_file_name
+                                    log_message(f"   ✅ Processed {products_processed} products from price file")
+                                    file_found = True
+                                    break
+                                else:
+                                    log_message(f"   ❌ Timed out waiting for price file: {expected_path}")
+                            else:
+                                log_message(f"   ❌ No download button found for {price_file_name}")
+                            break
+                    
+                    if not file_found:
+                        log_message(f"   ❌ Could not find file in table: {price_file_name}")
+
+                # Download and process PromoFull file (strict)
+                actual_promo_file = None
+                if promo_file_name and "PromoFull" in promo_file_name:
+                    log_message(f"   🔍 Looking for promo file: {promo_file_name}")
+                    expected_path = os.path.join(download_dir, promo_file_name)
+                    
+                    # Find the row containing this file and extract the button
+                    file_found = False
+                    for row in rows:
+                        cells = row.find_elements(By.TAG_NAME, "td")
+                        if len(cells) < 6:
+                            continue
+                        row_file_name = cells[0].text.strip()
+                        if row_file_name == promo_file_name:
+                            log_message(f"   ✅ Found file in table: {promo_file_name}")
+                            # Extract download button from this row
+                            download_buttons = cells[5].find_elements(By.TAG_NAME, "button")
+                            if download_buttons:
+                                btn = download_buttons[0]
+                                log_message(f"   🖱️ Clicking download for {promo_file_name}")
+                                driver.execute_script("arguments[0].click();", btn)
+                                if wait_for_file(expected_path):
+                                    log_message(f"   📄 Processing promo file: {expected_path}")
+                                    promotions_processed = process_promo_file(chain_code, branch_code, expected_path)
+                                    branch_processed += promotions_processed
+                                    actual_promo_file = promo_file_name
+                                    log_message(f"   ✅ Processed {promotions_processed} promotions from promo file")
+                                    file_found = True
+                                    break
+                                else:
+                                    log_message(f"   ❌ Timed out waiting for promo file: {expected_path}")
+                            else:
+                                log_message(f"   ❌ No download button found for {promo_file_name}")
+                            break
+                    
+                    if not file_found:
+                        log_message(f"   ❌ Could not find file in table: {promo_file_name}")
+
+                # Update database with actual processed file names (Option A)
+                if actual_price_file or actual_promo_file:
+                    try:
+                        conn = sqlite3.connect(db.db_path)
+                        cur = conn.cursor()
+                        branches_table = f"branches_{chain_code}"
+                        
+                        if actual_price_file:
+                            cur.execute(f"UPDATE {branches_table} SET price_file_name = ? WHERE branch_code = ?", 
+                                      (actual_price_file, branch_code))
+                            log_message(f"   📝 Updated price file name in database: {actual_price_file}")
+                        
+                        if actual_promo_file:
+                            cur.execute(f"UPDATE {branches_table} SET promo_file_name = ? WHERE branch_code = ?", 
+                                      (actual_promo_file, branch_code))
+                            log_message(f"   📝 Updated promo file name in database: {actual_promo_file}")
+                        
+                        conn.commit()
+                        conn.close()
+                    except Exception as e:
+                        log_message(f"   ⚠️ Error updating file names in database: {str(e)}")
+
+                # Clean up downloaded files after successful processing
+                files_to_cleanup = []
+                if actual_price_file:
+                    files_to_cleanup.append(os.path.join(download_dir, actual_price_file))
+                if actual_promo_file:
+                    files_to_cleanup.append(os.path.join(download_dir, actual_promo_file))
+                
+                for file_path in files_to_cleanup:
+                    try:
+                        if os.path.exists(file_path):
+                            os.remove(file_path)
+                            log_message(f"   🗑️ Cleaned up file: {os.path.basename(file_path)}")
+                    except Exception as e:
+                        log_message(f"   ⚠️ Error cleaning up file {file_path}: {str(e)}")
+
+                total_processed += branch_processed
+                branch_results.append({
+                    "branch_code": branch_code,
+                    "branch_name": branch_name,
+                    "files_processed": branch_processed,
+                    "price_file": actual_price_file or price_file_name,
+                    "promo_file": actual_promo_file or promo_file_name
+                })
+
+                log_message(f"   ✅ Completed branch {branch_code}: {branch_processed} items processed")
+
+            except Exception as e:
+                log_message(f"   ❌ Error processing branch {branch_code}: {str(e)}")
+                branch_results.append({
+                    "branch_code": branch_code,
+                    "branch_name": branch_name,
+                    "error": str(e)
+                })
+
+        # Close the single driver
+        try:
+            driver.quit()
+        except Exception:
             pass
         
-        conn.close()
+        chain_results.append({
+            "chain_name": chain_name,
+            "chain_code": chain_code,
+            "branches_processed": len(branch_results),
+            "total_items_processed": total_processed,
+            "branch_results": branch_results
+        })
+        
+        log_message(f"🎉 Phase 3 Complete: Processed {total_processed} items across {len(branch_results)} branches")
         
         return jsonify({
-            "chain_code": chain_code,
-            "branch_code": branch_code,
-            "metadata": metadata,
-            "products": products,
-            "promotions": promotions
+            "status": "success",
+            "phase": 3,
+            "total_items_processed": total_processed,
+            "chains_processed": len(chain_results),
+            "chain_results": chain_results
         })
         
     except Exception as e:
+        log_message(f"❌ Phase 3 failed: {str(e)}")
         return jsonify({
-            "error": f"Failed to get products for branch {branch_code}: {str(e)}"
+            "status": "error",
+            "error": str(e)
         })
 
-# ============================================================================
-# PHASE 1: DOWNLOAD, DECOMPRESS, AND PARSE BRANCH DATA
-# ============================================================================
-
-import requests
-import gzip
-import xml.etree.ElementTree as ET
-import os
-import sqlite3
-
 def download_branch_files(branch_code, price_filename, promo_filename):
-    """Download actual files from KingStore website"""
-    print(f"📥 REAL DOWNLOAD: Starting for branch {branch_code}")
-    print(f"📄 Target files: {price_filename}, {promo_filename}")
+    """Download actual files from food chain website"""
+    log_message(f"📥 Downloading files for branch {branch_code}")
     
     downloaded_files = {}
     driver = None
     
     try:
-        # Set up Selenium WebDriver
-        from selenium import webdriver
-        from selenium.webdriver.chrome.service import Service
-        from selenium.webdriver.chrome.options import Options
-        from selenium.webdriver.common.by import By
-        from selenium.webdriver.support.ui import WebDriverWait
-        from selenium.webdriver.support import expected_conditions as EC
-        from webdriver_manager.chrome import ChromeDriverManager
-        import os
-        import time
+        # Get chain URL from database
+        food_chains = db.get_all_food_chains()
+        if not food_chains:
+            return None
         
-        # Configure Chrome options for download with anti-bot measures
+        chain_code, chain_name, chain_url = food_chains[0]  # KingStore
+        
+        # Configure Chrome options
         chrome_options = Options()
-        chrome_options.add_argument("--headless")  # Run headless Chrome
+        chrome_options.add_argument("--headless")
         chrome_options.add_argument("--no-sandbox")
         chrome_options.add_argument("--disable-dev-shm-usage")
         chrome_options.add_argument("--disable-blink-features=AutomationControlled")
         chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
         chrome_options.add_experimental_option("useAutomationExtension", False)
         
-        # Real user agent to avoid bot detection
-        user_agent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        chrome_options.add_argument(f"--user-agent={user_agent}")
-        
-        # ========================================
-        # DOWNLOAD DIRECTORY CONFIGURATION
-        # ========================================
-        # This is the main download directory for all food chain files
-        # Change this path when moving the backend to production
-        DOWNLOAD_BASE_DIR = "downloads"  # TODO: Make this configurable via environment variable
-        
-        download_dir = os.path.abspath(DOWNLOAD_BASE_DIR)
+        # Set download directory
+        download_dir = "/Users/saar/repos/CursorProjects/smart_shared_list/branchesFiles"
         os.makedirs(download_dir, exist_ok=True)
-        print(f"📁 Download directory: {download_dir}")
         
-        # Clean up old duplicate files before downloading
-        print("🗑️ Cleaning up old duplicate files...")
-        import glob
-        duplicate_files = glob.glob(os.path.join(download_dir, "*(*)*"))
-        for file_path in duplicate_files:
-            os.remove(file_path)
-        if duplicate_files:
-            print(f"✅ Removed {len(duplicate_files)} duplicate files")
+        # Force download directory with command line arguments
+        chrome_options.add_argument(f"--download-directory={download_dir}")
+        chrome_options.add_argument("--disable-web-security")
+        chrome_options.add_argument("--allow-running-insecure-content")
         
         prefs = {
             "download.default_directory": download_dir,
             "download.prompt_for_download": False,
             "download.directory_upgrade": True,
-            "safebrowsing.enabled": True
+            "safebrowsing.enabled": True,
+            "profile.default_content_setting_values.automatic_downloads": 1,
+            "profile.default_content_settings.popups": 0,
+            "profile.managed_default_content_settings.images": 2,
+            "profile.content_settings.exceptions.automatic_downloads.*.setting": 1
         }
         chrome_options.add_experimental_option("prefs", prefs)
         
         # Initialize WebDriver
-        service = Service(ChromeDriverManager().install())
-        driver = webdriver.Chrome(service=service, options=chrome_options)
-        
-        # Remove webdriver property to avoid detection
+        driver = webdriver.Chrome(options=chrome_options)
         driver.execute_script('Object.defineProperty(navigator, "webdriver", {get: () => undefined})')
         
-        print("🌐 Navigating to KingStore page...")
-        driver.get("https://kingstore.binaprojects.com/Main.aspx")
+        log_message(f"🌐 Navigating to {chain_name} page...")
+        driver.get(chain_url)
         
         # Wait for the page to load and find the file table
         WebDriverWait(driver, 30).until(
             lambda d: any(len(row.find_elements(By.TAG_NAME, "td")) > 0 
-                         for row in d.find_elements(By.CSS_SELECTOR, "table tr"))
+                         for row in d.find_elements(By.CSS_SELECTOR, "table#myTable tr"))
         )
         
-        print(f"🔍 Looking for files: {price_filename}, {promo_filename}")
-        
         # Find all table rows
-        rows = driver.find_elements(By.CSS_SELECTOR, "table tr")
+        rows = driver.find_elements(By.CSS_SELECTOR, "table#myTable tr")
         files_downloaded = 0
         
         for row in rows:
             cells = row.find_elements(By.TAG_NAME, "td")
-            if len(cells) < 5:
+            if len(cells) < 6:
                 continue
                 
             file_name = cells[0].text.strip()
             row_branch_code = cells[1].text.strip()
             
             # Check if this row matches our target branch and file patterns
-            # Branch codes are like "1 אום אלפחם", so check if it starts with our branch_code
             branch_matches = row_branch_code.startswith(branch_code + ' ') or row_branch_code == branch_code
             
-            # Check for file pattern matches (handle both Price/PriceFull and Promo/PromoFull)
-            is_price_file = ('Price' in file_name and branch_code in file_name and 
-                           (file_name == price_filename or 
-                            file_name.replace('PriceFull', 'Price') == price_filename.replace('PriceFull', 'Price')))
-            is_promo_file = ('Promo' in file_name and branch_code in file_name and
-                           (file_name == promo_filename or 
-                            file_name.replace('PromoFull', 'Promo') == promo_filename.replace('PromoFull', 'Promo')))
+            # Check for file pattern matches - STRICT PriceFull/PromoFull only
+            is_price_file = ('PriceFull' in file_name and branch_code in file_name and file_name == price_filename)
+            is_promo_file = ('PromoFull' in file_name and branch_code in file_name and file_name == promo_filename)
             
             if branch_matches and (is_price_file or is_promo_file):
+                log_message(f"📥 Found target file: {file_name}")
                 
-                print(f"📥 Found target file: {file_name}")
-                
-                # Look for download button in the last cell (cell 5)
-                if len(cells) >= 6:  # Make sure we have enough cells
-                    download_buttons = cells[5].find_elements(By.TAG_NAME, "button")
-                    for button in download_buttons:
-                        print(f"🖱️ Clicking download button for {file_name}")
-                        driver.execute_script("arguments[0].click();", button)
-                        time.sleep(3)  # Wait for download to start
-                        files_downloaded += 1
-                        
-                        # Store the expected downloaded file path 
-                        # Note: Use the original expected filename, not the actual file_name from the table
-                        if is_price_file:
-                            # Map to the expected PriceFull filename, not the Price filename from table
-                            expected_price_file = price_filename if price_filename else file_name
-                            downloaded_files['price_file'] = os.path.join(download_dir, expected_price_file)
-                        elif is_promo_file:
-                            expected_promo_file = promo_filename if promo_filename else file_name
-                            downloaded_files['promo_file'] = os.path.join(download_dir, expected_promo_file)
-                        break
+                # Look for download button in the last cell
+                download_buttons = cells[5].find_elements(By.TAG_NAME, "button")
+                for button in download_buttons:
+                    log_message(f"🖱️ Clicking download button for {file_name}")
+                    driver.execute_script("arguments[0].click();", button)
+                    time.sleep(3)  # Wait for download to start
+                    files_downloaded += 1
+                    
+                    # Store the actual downloaded file name and path
+                    if is_price_file:
+                        downloaded_files['price_file'] = os.path.join(download_dir, file_name)
+                        downloaded_files['price_filename'] = file_name
+                    elif is_promo_file:
+                        downloaded_files['promo_file'] = os.path.join(download_dir, file_name)
+                        downloaded_files['promo_filename'] = file_name
+                    break
         
         driver.quit()
         
         if files_downloaded > 0:
-            print(f"✅ Successfully initiated {files_downloaded} file downloads")
-            # Wait a bit more for files to finish downloading
-            time.sleep(5)
+            log_message(f"✅ Successfully initiated {files_downloaded} file downloads")
+            time.sleep(5)  # Wait for files to finish downloading
         else:
-            print("❌ No matching files found for download")
+            log_message("❌ No matching files found for download")
             
         return downloaded_files
         
     except Exception as e:
-        print(f"❌ Error downloading files: {str(e)}")
+        log_message(f"❌ Error downloading files: {str(e)}")
         if driver:
             driver.quit()
         return None
 
 def decompress_gz_file(filepath):
     """Read XML file (handles .gz, .zip, and regular .xml files)"""
-    print(f"📦 Reading file: {filepath}")
+    log_message(f"📦 Reading file: {filepath}")
     
     try:
         # Check file signature to determine actual format
@@ -846,11 +643,10 @@ def decompress_gz_file(filepath):
             signature = f.read(2)
         
         if signature == b'PK':
-            # ZIP file (common for government data files)
-            print("🗜️ Detected ZIP file, extracting...")
+            # ZIP file
+            log_message("🗜️ Detected ZIP file, extracting...")
             import zipfile
             with zipfile.ZipFile(filepath, 'r') as zip_file:
-                # Get the first XML file in the zip
                 xml_files = [name for name in zip_file.namelist() if name.endswith('.xml')]
                 if xml_files:
                     with zip_file.open(xml_files[0]) as xml_file:
@@ -860,439 +656,1353 @@ def decompress_gz_file(filepath):
                     
         elif signature == b'\x1f\x8b':
             # Gzip file
-            print("🗜️ Detected gzip file, decompressing...")
+            log_message("🗜️ Detected gzip file, decompressing...")
             with gzip.open(filepath, 'rt', encoding='utf-8') as f:
                 xml_content = f.read()
         else:
             # Regular XML file
-            print("📄 Regular XML file, reading directly...")
+            log_message("📄 Regular XML file, reading directly...")
             with open(filepath, 'r', encoding='utf-8') as f:
                 xml_content = f.read()
                 
-        print(f"✅ File read successfully, XML size: {len(xml_content)} characters")
+        log_message(f"✅ File read successfully, XML size: {len(xml_content)} characters")
         return xml_content
     except Exception as e:
-        print(f"❌ Error reading {filepath}: {str(e)}")
+        log_message(f"❌ Error reading {filepath}: {str(e)}")
         return None
 
-def parse_price_xml(xml_content):
-    """Parse PriceFull XML and return list of products"""
-    print("🔍 Parsing PriceFull XML...")
-    
+def process_price_file(chain_code, branch_code, file_path):
+    """Process PriceFull XML file and store products in database"""
     try:
+        xml_content = decompress_gz_file(file_path)
+        if not xml_content:
+            return 0
+        
+        # Parse XML and extract products
         root = ET.fromstring(xml_content)
-        products = []
+        products_processed = 0
         
-        # Extract metadata
-        chain_id = root.find('ChainId').text if root.find('ChainId') is not None else ""
-        store_id = root.find('StoreId').text if root.find('StoreId') is not None else ""
-        
-        # Parse items
-        items = root.find('Items')
-        if items is not None:
-            for item in items.findall('Item'):
-                product = {
-                    'chain_id': chain_id,
-                    'store_id': store_id,
-                    'item_code': get_xml_text(item, 'ItemCode'),
-                    'item_name': get_xml_text(item, 'ItemNm'),
-                    'manufacturer_name': get_xml_text(item, 'ManufacturerName'),
-                    'manufacturer_item_description': get_xml_text(item, 'ManufacturerItemDescription'),
-                    'unit_qty': get_xml_text(item, 'UnitQty'),
-                    'quantity': get_xml_text(item, 'Quantity'),
-                    'unit_of_measure': get_xml_text(item, 'UnitOfMeasure'),
-                    'is_weighted': get_xml_text(item, 'bIsWeighted'),
-                    'qty_in_package': get_xml_text(item, 'QtyInPackage'),
-                    'item_price': get_xml_text(item, 'ItemPrice'),
-                    'unit_of_measure_price': get_xml_text(item, 'UnitOfMeasurePrice'),
-                    'allow_discount': get_xml_text(item, 'AllowDiscount'),
-                    'item_status': get_xml_text(item, 'ItemStatus'),
-                    'manufacture_country': get_xml_text(item, 'ManufactureCountry'),
-                    'price_update_date': get_xml_text(item, 'PriceUpdateDate')
-                }
-                products.append(product)
-        
-        print(f"✅ Parsed {len(products)} products from PriceFull XML")
-        return products
-        
-    except Exception as e:
-        print(f"❌ Error parsing PriceFull XML: {str(e)}")
-        return []
-
-def parse_promo_xml(xml_content):
-    """Parse PromoFull XML and return list of promotions"""
-    print("🎯 Parsing PromoFull XML...")
-    
-    try:
-        root = ET.fromstring(xml_content)
-        promotions = []
-        
-        # Extract metadata
-        chain_id = root.find('ChainId').text if root.find('ChainId') is not None else ""
-        store_id = root.find('StoreId').text if root.find('StoreId') is not None else ""
-        
-        # Parse promotions
-        promos = root.find('Promotions')
-        if promos is not None:
-            for promo in promos.findall('Promotion'):
-                promotion = {
-                    'chain_id': chain_id,
-                    'store_id': store_id,
-                    'promotion_id': get_xml_text(promo, 'PromotionId'),
-                    'promotion_description': get_xml_text(promo, 'PromotionDescription'),
-                    'promotion_update_date': get_xml_text(promo, 'PromotionUpdateDate'),
-                    'promotion_start_date': get_xml_text(promo, 'PromotionStartDate'),
-                    'promotion_start_hour': get_xml_text(promo, 'PromotionStartHour'),
-                    'promotion_end_date': get_xml_text(promo, 'PromotionEndDate'),
-                    'promotion_end_hour': get_xml_text(promo, 'PromotionEndHour'),
-                    'discounted_price': get_xml_text(promo, 'DiscountedPrice'),
-                    'discounted_price_per_unit': get_xml_text(promo, 'DiscountedPricePerMida'),
-                    'discount_rate': get_xml_text(promo, 'DiscountRate'),
-                    'min_quantity': get_xml_text(promo, 'MinQty'),
-                    'max_quantity': get_xml_text(promo, 'MaxQty'),
-                    'min_purchase_amount': get_xml_text(promo, 'MinPurchaseAmnt'),
-                    'allow_multiple_discounts': get_xml_text(promo, 'AllowMultipleDiscounts'),
-                    'reward_type': get_xml_text(promo, 'RewardType'),
-                    'discount_type': get_xml_text(promo, 'DiscountType'),
-                    'remarks': get_xml_text(promo, 'Remarks'),
-                    'items': []
+        # Find all item elements (adjust XPath based on actual XML structure)
+        for item in root.findall('.//Item'):
+            try:
+                product_data = {
+                    'item_code': item.find('ItemCode').text if item.find('ItemCode') is not None else '',
+                    # Some datasets use <ItemNm> instead of <ItemName>
+                    'item_name': (
+                        item.find('ItemName').text if item.find('ItemName') is not None and item.find('ItemName').text is not None
+                        else (item.find('ItemNm').text if item.find('ItemNm') is not None else '')
+                    ),
+                    'manufacturer_name': item.find('ManufacturerName').text if item.find('ManufacturerName') is not None else '',
+                    'item_price': item.find('ItemPrice').text if item.find('ItemPrice') is not None else '',
+                    # Some datasets use <UnitQty> in addition or instead
+                    'unit_of_measure': (
+                        item.find('UnitOfMeasure').text if item.find('UnitOfMeasure') is not None and item.find('UnitOfMeasure').text is not None
+                        else (item.find('UnitQty').text if item.find('UnitQty') is not None else '')
+                    ),
+                    'quantity': item.find('Quantity').text if item.find('Quantity') is not None else '',
+                    'price_update_date': item.find('PriceUpdateDate').text if item.find('PriceUpdateDate') is not None else ''
                 }
                 
-                # Parse promotion items
-                promo_items = promo.find('PromotionItems')
-                if promo_items is not None:
-                    for item in promo_items.findall('Item'):
-                        promotion['items'].append({
-                            'item_code': get_xml_text(item, 'ItemCode'),
-                            'is_gift_item': get_xml_text(item, 'IsGiftItem'),
-                            'item_type': get_xml_text(item, 'ItemType')
-                        })
+                db.add_product(chain_code, branch_code, product_data)
+                products_processed += 1
                 
-                promotions.append(promotion)
+            except Exception as e:
+                log_message(f"   ⚠️ Error processing product: {str(e)}")
+                continue
         
-        print(f"✅ Parsed {len(promotions)} promotions from PromoFull XML")
-        return promotions
+        log_message(f"   📊 Processed {products_processed} products from price file")
+        return products_processed
         
     except Exception as e:
-        print(f"❌ Error parsing PromoFull XML: {str(e)}")
-        return []
+        log_message(f"❌ Error processing price file: {str(e)}")
+        return 0
 
-def get_xml_text(element, tag_name):
-    """Helper function to safely get text from XML element"""
-    child = element.find(tag_name)
-    return child.text if child is not None else ""
-
-@app.route('/process-branch/<branch_code>')
-def process_branch(branch_code):
-    """Download, decompress, and parse data for a specific branch"""
-    log_message(f"🚀 NEW REQUEST: /process-branch/{branch_code}")
-    
+def process_promo_file(chain_code, branch_code, file_path):
+    """Process PromoFull XML file and store promotions in database"""
     try:
-        # Get branch info from database
-        conn = db.db.connect() if hasattr(db, 'db') else None
-        if not conn:
-            import sqlite3
-            conn = sqlite3.connect(db.db_path)
+        xml_content = decompress_gz_file(file_path)
+        if not xml_content:
+            return 0
         
-        cursor = conn.cursor()
-        cursor.execute('''
-            SELECT branch_code, branch_name, price_file_name, promo_file_name
-            FROM branches 
-            WHERE branch_code = ?
-        ''', (branch_code,))
+        # Parse XML and extract promotions
+        root = ET.fromstring(xml_content)
+        promotions_processed = 0
         
-        row = cursor.fetchone()
-        conn.close()
-        
-        if not row:
-            return jsonify({"error": f"Branch {branch_code} not found in database"})
-        
-        _, branch_name, price_filename, promo_filename = row
-        
-        # Step 1: Download files
-        downloaded_files = download_branch_files(branch_code, price_filename, promo_filename)
-        
-        if not downloaded_files:
-            return jsonify({"error": "Failed to download any files"})
-        
-        results = {
-            "branch_code": branch_code,
-            "branch_name": branch_name,
-            "products": [],
-            "promotions": [],
-            "files_processed": [],
-            "debug_info": []
-        }
-        
-        # Step 2 & 3: Decompress and parse PriceFull
-        if 'price_file' in downloaded_files:
-            xml_content = decompress_gz_file(downloaded_files['price_file'])
-            if xml_content:
-                products = parse_price_xml(xml_content)
-                results['products'] = products
-                results['files_processed'].append(price_filename)
-        
-        # Step 2 & 3: Decompress and parse PromoFull  
-        if 'promo_file' in downloaded_files:
-            xml_content = decompress_gz_file(downloaded_files['promo_file'])
-            if xml_content:
-                promotions = parse_promo_xml(xml_content)
-                results['promotions'] = promotions
-                results['files_processed'].append(promo_filename)
-        
-        # Step 4: INSERT INTO DATABASE with proper relationships
-        database_results = {
-            "products_inserted": 0,
-            "promotions_inserted": 0,
-            "promotion_items_inserted": 0
-        }
-        
-        if results['products'] or results['promotions']:
-            print(f"💾 Step 4: Inserting data into database for Branch {branch_code}")
-            
-            # Insert products with clear chain/branch relationship
-            if results['products']:
-                try:
-                    # Convert field names to match database method expectations
-                    db_products = []
-                    for product in results['products']:
-                        db_product = {
-                            'ItemCode': product['item_code'],
-                            'ItemNm': product['item_name'], 
-                            'ManufacturerName': product['manufacturer_name'],
-                            'ManufacturerItemDescription': product['manufacturer_item_description'],
-                            'ItemPrice': product['item_price'],
-                            'UnitOfMeasurePrice': product['unit_of_measure_price'] or product['item_price'],
-                            'UnitQty': product['unit_qty'] or 'יחידה',
-                            'Quantity': product['quantity'] or '1',
-                            'UnitOfMeasure': product['unit_of_measure'] or 'יחידה',
-                            'bIsWeighted': product['is_weighted'] or '0',
-                            'QtyInPackage': product['qty_in_package'] or '1',
-                            'AllowDiscount': product['allow_discount'] or '1',
-                            'ItemStatus': product['item_status'] or '1',
-                            'ManufactureCountry': 'IL',
-                            'PriceUpdateDate': product['price_update_date']
-                        }
-                        db_products.append(db_product)
-                    
-                    # Call with correct parameters: chain_code, branch_code, products_data
-                    db.insert_products('CHAIN_001', branch_code, db_products)
-                    database_results["products_inserted"] = len(db_products)
-                    print(f"✅ Inserted {len(db_products)} products for Branch {branch_code} → CHAIN_001 (KingStore)")
-                    
-                    # ========================================
-                    # POPULATE HIERARCHICAL DATABASE
-                    # ========================================
+        # Find all promotion elements (adjust XPath based on actual XML structure)
+        for promo in root.findall('.//Promotion'):
+            try:
+                # Extract promotion data
+                # Handle alternate field names and join date+hour where available
+                def text_or(elem_name: str) -> str:
+                    elem = promo.find(elem_name)
+                    return elem.text if elem is not None and elem.text is not None else ''
+
+                start_date = text_or('PromotionStartDate')
+                start_hour = text_or('PromotionStartHour')
+                end_date = text_or('PromotionEndDate')
+                end_hour = text_or('PromotionEndHour')
+                start_dt = f"{start_date} {start_hour}".strip() if start_date or start_hour else ''
+                end_dt = f"{end_date} {end_hour}".strip() if end_date or end_hour else ''
+
+                # Min/Max quantities with proper tag names
+                min_qty = text_or('MinQty') or text_or('MinQuantity')
+                max_qty = text_or('MaxQty') or text_or('MaxQuantity')
+
+                # Discounted price per unit/Mida
+                per_unit = text_or('DiscountedPricePerMida') or text_or('DiscountedPricePerUnit')
+
+                promotion_data = {
+                    'promotion_id': text_or('PromotionId'),
+                    'promotion_description': text_or('PromotionDescription'),
+                    'discounted_price': text_or('DiscountedPrice'),
+                    'min_quantity': min_qty,
+                    'promotion_end_date': end_dt or end_date,
+                    'promotion_start_date': start_dt or start_date,
+                    'max_quantity': max_qty,
+                    'discounted_price_per_unit': per_unit,
+                    'item_codes': [],
+                    'items_count': 0,
+                    'related_item_codes': ''
+                }
+                
+                # Extract item codes under PromotionItems; fallback to any ItemCode
+                item_codes_set = set()
+                for it in promo.findall('.//PromotionItems//Item'):
+                    code_el = it.find('ItemCode')
+                    if code_el is not None and code_el.text:
+                        item_codes_set.add(code_el.text)
+                if not item_codes_set:
+                    for code in promo.findall('.//ItemCode'):
+                        if code.text:
+                            item_codes_set.add(code.text)
+                item_codes = sorted(item_codes_set)
+                promotion_data['item_codes'] = item_codes
+                # Promotion parsed successfully
+                # Prefer the declared count attribute if present and numeric
+                items_count_attr = 0
+                pi_node = promo.find('PromotionItems')
+                if pi_node is not None:
                     try:
-                        # Ensure KingStore exists in hierarchical DB
-                        hierarchical_db.add_food_chain(
-                            'CHAIN_001', 
-                            'אלמשהדאוי קינג סטור בע"מ',
-                            'https://kingstore.binaprojects.com/Main.aspx'
-                        )
-                        
-                        # Get branch name from database
-                        import sqlite3
-                        conn = sqlite3.connect(db.db_path)
-                        cursor = conn.cursor()
-                        cursor.execute('SELECT branch_name FROM branches WHERE branch_code = ?', (branch_code,))
-                        branch_result = cursor.fetchone()
-                        branch_name = branch_result[0] if branch_result else f'Branch {branch_code}'
-                        conn.close()
-                        
-                        # Ensure branch exists in hierarchical DB
-                        hierarchical_db.add_branch_to_chain(
-                            'CHAIN_001', branch_code, branch_name,
-                            price_filename, promo_filename
-                        )
-                        
-                        # Convert products for hierarchical DB
-                        hierarchical_products = []
-                        for product in results['products']:
-                            hierarchical_product = {
-                                'item_code': product['item_code'],
-                                'item_name': product['item_name'],
-                                'manufacturer_name': product['manufacturer_name'],
-                                'item_price': product['item_price'],
-                                'unit_of_measure': product['unit_of_measure'],
-                                'quantity': product['quantity'],
-                                'price_update_date': product['price_update_date']
-                            }
-                            hierarchical_products.append(hierarchical_product)
-                        
-                        # Insert products into hierarchical structure
-                        hierarchical_count = hierarchical_db.insert_branch_products(
-                            'CHAIN_001', branch_code, hierarchical_products
-                        )
-                        
-                        print(f"🏗️ Hierarchical DB: {hierarchical_count} products inserted into branch table")
-                        
-                        # ========================================
-                        # INSERT PROMOTIONS INTO HIERARCHICAL DB
-                        # ========================================
-                        if results['promotions']:
-                            try:
-                                # Convert promotions for hierarchical DB
-                                hierarchical_promotions = []
-                                for promotion in results['promotions']:
-                                    hierarchical_promotion = {
-                                        'promotion_id': promotion['promotion_id'],
-                                        'promotion_description': promotion['promotion_description'],
-                                        'promotion_update_date': promotion['promotion_update_date'],
-                                        'promotion_start_date': promotion['promotion_start_date'],
-                                        'promotion_start_hour': promotion['promotion_start_hour'],
-                                        'promotion_end_date': promotion['promotion_end_date'],
-                                        'promotion_end_hour': promotion['promotion_end_hour'],
-                                        'discounted_price': promotion['discounted_price'],
-                                        'discounted_price_per_unit': promotion['discounted_price_per_unit'],
-                                        'discount_rate': promotion['discount_rate'],
-                                        'min_quantity': promotion['min_quantity'],
-                                        'max_quantity': promotion['max_quantity'],
-                                        'min_purchase_amount': promotion['min_purchase_amount'],
-                                        'allow_multiple_discounts': promotion['allow_multiple_discounts'],
-                                        'reward_type': promotion['reward_type'],
-                                        'discount_type': promotion['discount_type'],
-                                        'remarks': promotion['remarks'],
-                                        'items': promotion['items']
-                                    }
-                                    hierarchical_promotions.append(hierarchical_promotion)
-                                
-                                # Insert promotions into hierarchical structure
-                                hierarchical_promo_count = hierarchical_db.insert_branch_promotions(
-                                    'CHAIN_001', branch_code, hierarchical_promotions
-                                )
-                                
-                                print(f"🏗️ Hierarchical DB: {hierarchical_promo_count} promotions inserted into branch table")
-                                
-                            except Exception as hier_promo_error:
-                                print(f"⚠️ Hierarchical DB promotion insertion failed: {str(hier_promo_error)}")
-                        
-                    except Exception as hier_error:
-                        print(f"⚠️ Hierarchical DB insertion failed: {str(hier_error)}")
-                    
-                except Exception as e:
-                    print(f"❌ Error inserting products: {str(e)}")
-            
-            # Insert promotions with clear chain/branch relationship  
-            if results['promotions']:
+                        items_count_attr = int(pi_node.get('count') or 0)
+                    except Exception:
+                        items_count_attr = 0
+                promotion_data['items_count'] = items_count_attr or len(item_codes)
+                # We no longer store a redundant related list string in DB usage
+                promotion_data['related_item_codes'] = ''
+                
+                db.add_promotion(chain_code, branch_code, promotion_data)
+                promotions_processed += 1
+                
+            except Exception as e:
+                log_message(f"   ⚠️ Error processing promotion: {str(e)}")
+                continue
+        
+        log_message(f"   📊 Processed {promotions_processed} promotions from promo file")
+        return promotions_processed
+        
+    except Exception as e:
+        log_message(f"❌ Error processing promo file: {str(e)}")
+        return 0
+
+@app.route('/update-file-names')
+def update_file_names():
+    """Update file names for all branches of all food chains"""
+    try:
+        log_message("🚀 Starting File Name Update for All Food Chains...")
+        
+        # Get all food chains from database
+        food_chains = db.get_all_food_chains()
+        if not food_chains:
+            return jsonify({
+                "status": "error",
+                "error": "No food chains found. Run Phase 1 first."
+            })
+        
+        total_updates = 0
+        chain_results = []
+        
+        for chain_code, chain_name, chain_url in food_chains:
+            try:
+                log_message(f"📊 Processing chain: {chain_name} ({chain_code})")
+                
+                # Get all branches for this chain
                 try:
-                    # Convert field names to match database method expectations
-                    db_promotions = []
-                    for promotion in results['promotions']:
-                        # Fix promotion items field names
-                        fixed_items = []
-                        for item in promotion.get('items', []):
-                            fixed_item = {
-                                'ItemCode': item.get('item_code', ''),
-                                'IsGiftItem': item.get('is_gift_item', '0'),
-                                'ItemType': item.get('item_type', '1')
-                            }
-                            fixed_items.append(fixed_item)
-                        
-                        # Helper function to ensure valid numeric values
-                        def safe_num(val, default='0', as_int=False):
-                            if not val or not val.strip():
-                                return default
-                            try:
-                                if as_int:
-                                    # Convert to float first, then to int to handle '1.1' -> 1
-                                    return str(int(float(val.strip())))
-                                else:
-                                    return val.strip()
-                            except (ValueError, TypeError):
-                                return default
-                        
-                        db_promo = {
-                            'PromotionId': promotion['promotion_id'] or '0',
-                            'PromotionDescription': promotion['promotion_description'] or 'No description',
-                            'PromotionStartDate': promotion['promotion_start_date'] or '2025-01-01',
-                            'PromotionStartHour': '00:00:00',  # Default hour
-                            'PromotionEndDate': promotion['promotion_end_date'] or '2025-12-31',
-                            'PromotionEndHour': '23:59:00',    # Default hour
-                            'RewardType': safe_num(promotion['reward_type'], '1', as_int=True),
-                            'DiscountType': '1',  # Default discount type
-                            'DiscountRate': safe_num(promotion['discount_rate'], '0.00'),
-                            'DiscountedPrice': safe_num(promotion['discounted_price'], '0.00'),
-                            'DiscountedPricePerMida': safe_num(promotion['discounted_price'], '0.00'),
-                            'MinQty': safe_num(promotion['min_qty'], '1', as_int=True),
-                            'MaxQty': safe_num(promotion['max_qty'], '0', as_int=True),
-                            'MinPurchaseAmnt': '0.00',  # Default minimum purchase
-                            'PromotionUpdateDate': promotion['promotion_update_date'] or '2025-01-01 00:00:00',
-                            'PromotionItems': fixed_items  # Fixed promotion items with correct field names
-                        }
-                        db_promotions.append(db_promo)
-                    
-                    # DEBUG: Add info to response
-                    results['debug_info'].append(f"About to insert {len(db_promotions)} promotions")
-                    for i, p in enumerate(db_promotions[:1]):  # Show first one
-                        results['debug_info'].append(f"Promotion {i+1}: {p['PromotionId']} - {p['PromotionDescription']}")
-                        results['debug_info'].append(f"Items: {len(p.get('PromotionItems', []))}")
-                    
-                    # Call with correct parameters: chain_code, branch_code, promotions_data
-                    try:
-                        db.insert_promotions('CHAIN_001', branch_code, db_promotions)
-                        database_results["promotions_inserted"] = len(db_promotions)
-                        # Count total promotion items
-                        total_items = sum(len(promo.get('PromotionItems', [])) for promo in db_promotions)
-                        database_results["promotion_items_inserted"] = total_items
-                        
-                        results['debug_info'].append(f"SUCCESS: Inserted {len(db_promotions)} promotions")
-                        results['debug_info'].append(f"SUCCESS: Inserted {total_items} promotion items")
-                    except Exception as insert_error:
-                        results['debug_info'].append(f"ERROR: Promotion insertion failed: {str(insert_error)}")
-                        database_results["promotions_inserted"] = 0
-                        database_results["promotion_items_inserted"] = 0
-                    
+                    branches = db.get_branches(chain_code)
+                    if not branches:
+                        log_message(f"⚠️ No branches found for {chain_name}, skipping...")
+                        continue
                 except Exception as e:
-                    print(f"❌ Error inserting promotions: {str(e)}")
+                    log_message(f"⚠️ No branch table exists for {chain_name}, skipping...")
+                    continue
+                
+                log_message(f"🏪 Found {len(branches)} branches for {chain_name}")
+                
+                # Create driver and navigate to chain URL
+                driver = create_driver()
+                driver.get(chain_url)
+                
+                # Wait for the file table to be populated
+                WebDriverWait(driver, 30).until(
+                    lambda d: any(len(row.find_elements(By.TAG_NAME, "td")) > 0 for row in d.find_elements(By.CSS_SELECTOR, "table#myTable tr"))
+                )
+                
+                chain_rows = driver.find_elements(By.CSS_SELECTOR, "table#myTable tr")
+                log_message(f"📁 Found {len(chain_rows)} file entries for {chain_name}")
+                
+                # Parse file table to find latest files for each branch
+                branch_files = {}
+                
+                for row in chain_rows:
+                    cells = row.find_elements(By.TAG_NAME, "td")
+                    if len(cells) < 2:
+                        continue
+                    
+                    file_name = cells[0].text.strip()
+                    branch_code_full = cells[1].text.strip()
+                    
+                    # Skip empty or invalid entries
+                    if not file_name or not branch_code_full:
+                        continue
+                    
+                    # Extract just the numeric code from "339 יפו תלאביב מכללה" -> "339"
+                    branch_code = branch_code_full.split(' ', 1)[0] if ' ' in branch_code_full else branch_code_full
+                    
+                    # Extract date from end of filename: PriceFull7290058108879-001-202507271024.gz -> 202507271024
+                    import re
+                    match = re.search(r'-(\d{12})\.gz$', file_name)
+                    file_date = match.group(1) if match else ""
+                    
+                    # Determine file type - we need PriceFull and PromoFull files
+                    if "PriceFull" in file_name:
+                        file_type = "PriceFull"
+                    elif "PromoFull" in file_name:
+                        file_type = "PromoFull"
+                    else:
+                        continue
+                    
+                    # Track latest file for each branch
+                    if branch_code not in branch_files:
+                        branch_files[branch_code] = {"PriceFull": ("", ""), "PromoFull": ("", "")}
+                    
+                    if file_type == "PriceFull" and file_date > branch_files[branch_code]["PriceFull"][1]:
+                        branch_files[branch_code]["PriceFull"] = (file_name, file_date)
+                    if file_type == "PromoFull" and file_date > branch_files[branch_code]["PromoFull"][1]:
+                        branch_files[branch_code]["PromoFull"] = (file_name, file_date)
+                
+                driver.quit()
+                
+                # Update database with file names for each branch
+                chain_updates = 0
+                for branch_code, branch_name, existing_price_file, existing_promo_file in branches:
+                    if branch_code in branch_files:
+                        price_file = branch_files[branch_code]["PriceFull"][0]
+                        promo_file = branch_files[branch_code]["PromoFull"][0]
+                        
+                        # Update branch with file names
+                        db.add_branch(chain_code, branch_code, branch_name, price_file, promo_file)
+                        chain_updates += 1
+                        log_message(f"   ✅ Updated branch {branch_code}: Price={price_file}, Promo={promo_file}")
+                    else:
+                        log_message(f"   ⚠️ No files found for branch {branch_code}")
+                
+                total_updates += chain_updates
+                chain_results.append({
+                    "chain_name": chain_name,
+                    "chain_code": chain_code,
+                    "branches_updated": chain_updates,
+                    "total_branches": len(branches)
+                })
+                
+                log_message(f"✅ Completed {chain_name}: {chain_updates}/{len(branches)} branches updated")
+                
+            except Exception as e:
+                log_message(f"❌ Error processing chain {chain_name}: {str(e)}")
+                chain_results.append({
+                    "chain_name": chain_name,
+                    "chain_code": chain_code,
+                    "error": str(e)
+                })
         
-        results['database_insertion'] = database_results
-        
-        print(f"🎉 COMPLETE: Branch {branch_code} pipeline finished!")
-        print(f"   📦 Products parsed: {len(results['products'])}")
-        print(f"   🎯 Promotions parsed: {len(results['promotions'])}")
-        print(f"   💾 Products in DB: {database_results['products_inserted']}")
-        print(f"   💾 Promotions in DB: {database_results['promotions_inserted']}")
+        log_message(f"🎉 File name update complete! Total updates: {total_updates}")
         
         return jsonify({
-            "success": True,
-            "message": f"Successfully processed and stored branch {branch_code}",
-            "data": results
+            "status": "success",
+            "total_updates": total_updates,
+            "chains_processed": len(chain_results),
+            "chain_results": chain_results
         })
         
     except Exception as e:
-        log_message(f"❌ Error processing branch {branch_code}: {str(e)}")
-        return jsonify({"error": f"Failed to process branch {branch_code}: {str(e)}"})
+        log_message(f"❌ File name update failed: {str(e)}")
+        return jsonify({
+            "status": "error",
+            "error": str(e)
+        })
+
+@app.route('/update')
+def update():
+    """Integrated update: Update file names + Download & Process + Cleanup"""
+    try:
+        log_message("🔄 Starting Integrated Update Process...")
+        
+        # Step 1: Update file names (using the proven update_file_names logic)
+        log_message("📝 Step 1: Updating file names...")
+        try:
+            # Call the existing update_file_names endpoint internally
+            from flask import Flask
+            with app.test_client() as client:
+                response = client.get('/update-file-names')
+                update_result = response.get_json()
+                
+                if update_result.get('status') != 'success':
+                    return jsonify({
+                        "status": "error", 
+                        "error": f"File name update failed: {update_result.get('error', 'Unknown error')}"
+                    })
+                
+                total_updates = update_result.get('total_updates', 0)
+                log_message(f"✅ Step 1 Complete: Updated {total_updates} branches")
+            
+        except Exception as e:
+            return jsonify({
+                "status": "error", 
+                "error": f"Failed in Step 1 (update file names): {str(e)}"
+            })
+        
+        # Step 2: Download and process files (simplified approach using existing Phase 3)
+        log_message("📥 Step 2: Downloading and processing files...")
+        try:
+            # Just call the existing phase3 endpoint internally
+            from flask import Flask
+            with app.test_client() as client:
+                response = client.get('/phase3')
+                phase3_result = response.get_json()
+                
+                if phase3_result.get('status') != 'success':
+                    return jsonify({
+                        "status": "error", 
+                        "error": f"Phase 3 failed: {phase3_result.get('error', 'Unknown error')}"
+                    })
+                
+                total_processed = phase3_result.get('total_items_processed', 0)
+                log_message(f"✅ Step 2 Complete: Processed {total_processed} items")
+            
+        except Exception as e:
+            return jsonify({
+                "status": "error", 
+                "error": f"Failed in Step 2 (download & process): {str(e)}"
+            })
+        
+        log_message("🎉 Integrated Update Complete!")
+        
+        return jsonify({
+            "status": "success",
+            "message": "Update completed successfully",
+            "file_updates": total_updates,
+            "items_processed": total_processed
+        })
+        
+    except Exception as e:
+        log_message(f"❌ Update failed: {str(e)}")
+        return jsonify({
+            "status": "error",
+            "error": str(e)
+        })
+
+@app.route('/debug-files')
+def debug_files():
+    """Debug endpoint to check file table indexing"""
+    try:
+        from selenium import webdriver
+        from selenium.webdriver.chrome.options import Options
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.support.ui import WebDriverWait
+        
+        # Get first food chain
+        food_chains = db.get_all_food_chains()
+        if not food_chains:
+            return jsonify({"error": "No food chains found"})
+        
+        chain_code, chain_name, chain_url = food_chains[0]
+        
+        # Get first few branches
+        branches = db.get_branches(chain_code)[:3]  # Just first 3 for debugging
+        
+        # Create driver and navigate to chain URL
+        chrome_options = Options()
+        chrome_options.add_argument("--headless")
+        chrome_options.add_argument("--no-sandbox")
+        chrome_options.add_argument("--disable-dev-shm-usage")
+        chrome_options.add_argument("--disable-web-security")
+        chrome_options.add_argument("--allow-running-insecure-content")
+        chrome_options.add_argument(f"--download-directory=/Users/saar/repos/CursorProjects/smart_shared_list/branchesFiles")
+        chrome_options.add_experimental_option("prefs", {
+            "download.default_directory": "/Users/saar/repos/CursorProjects/smart_shared_list/branchesFiles",
+            "download.prompt_for_download": False,
+            "download.directory_upgrade": True,
+            "safebrowsing.enabled": True,
+            "profile.default_content_setting_values.automatic_downloads": 1
+        })
+        
+        driver = webdriver.Chrome(options=chrome_options)
+        driver.get(chain_url)
+        
+        # Wait for page to load
+        WebDriverWait(driver, 30).until(
+            lambda d: any(len(row.find_elements(By.TAG_NAME, "td")) > 0 
+                          for row in d.find_elements(By.CSS_SELECTOR, "table tr"))
+        )
+        
+        # Try to search for PriceFull files like the user did in the screenshot
+        try:
+            search_box = driver.find_element(By.CSS_SELECTOR, "input[type='text'], input[placeholder*='search'], input[name*='search']")
+            search_box.clear()
+            search_box.send_keys("pricefull")
+            search_box.submit()
+            time.sleep(3)  # Wait for search results
+            log_message("🔍 Searched for 'pricefull' files")
+        except Exception as e:
+            log_message(f"⚠️ Could not search: {e}")
+            # Continue without search
+        
+        rows = driver.find_elements(By.CSS_SELECTOR, "table tr")
+        
+        # Build file index with debugging
+        table_index = {}
+        indexed_files = []
+        
+        for row in rows[:100]:  # Check first 100 rows for debugging
+            cells = row.find_elements(By.TAG_NAME, "td")
+            if len(cells) < 6:
+                continue
+            file_name = cells[0].text.strip()
+            branch_code_full = cells[1].text.strip()
+            short_code = branch_code_full.split(' ', 1)[0] if ' ' in branch_code_full else branch_code_full
+            
+            # Show ALL files for debugging, not just PriceFull/PromoFull
+            buttons = cells[5].find_elements(By.TAG_NAME, "button")
+            has_button = len(buttons) > 0
+            
+            indexed_files.append({
+                "file_name": file_name,
+                "branch_code": short_code,
+                "branch_full": branch_code_full,
+                "has_button": has_button,
+                "is_target": "PriceFull" in file_name or "PromoFull" in file_name,
+                "cell_count": len(cells)
+            })
+            
+            # Only add to lookup table if it's a target file
+            if "PriceFull" in file_name or "PromoFull" in file_name:
+                table_index[(short_code, file_name)] = has_button
+        
+        driver.quit()
+        
+        # Check what we're looking for vs what we found
+        lookups = []
+        for branch_code, branch_name, price_file, promo_file in branches:
+            price_key = (branch_code, price_file) if price_file else None
+            promo_key = (branch_code, promo_file) if promo_file else None
+            
+            lookups.append({
+                "branch_code": branch_code,
+                "branch_name": branch_name,
+                "price_file": price_file,
+                "promo_file": promo_file,
+                "price_found": table_index.get(price_key, False) if price_key else None,
+                "promo_found": table_index.get(promo_key, False) if promo_key else None
+            })
+        
+        return jsonify({
+            "status": "success",
+            "chain_url": chain_url,
+            "total_rows": len(rows),
+            "indexed_files": indexed_files,
+            "branch_lookups": lookups
+        })
+        
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)})
+
+@app.route('/reprocess-local')
+def reprocess_local():
+    """Reprocess already-downloaded files from the branchesFiles directory to refresh DB (no downloads)."""
+    try:
+        food_chains = db.get_all_food_chains()
+        if not food_chains:
+            return jsonify({"status": "error", "error": "No food chains found"})
+        chain_code, chain_name, chain_url = food_chains[0]
+
+        try:
+            branches = db.get_branches(chain_code)
+        except Exception:
+            return jsonify({"status": "error", "error": f"No branches table for {chain_code}"})
+
+        download_dir = os.path.abspath("branchesFiles")
+        total = 0
+        branch_results = []
+
+        for branch_code, branch_name, price_file_name, promo_file_name in branches:
+            processed = 0
+            # Ensure tables exist and clear previous rows to avoid stale values
+            try:
+                db.create_products_table(chain_code, branch_code)
+                db.create_promotions_table(chain_code, branch_code)
+                # Clear existing data before reprocessing
+                db.clear_branch_data(chain_code, branch_code)
+            except Exception:
+                pass
+
+            if price_file_name:
+                price_path = os.path.join(download_dir, price_file_name)
+                if os.path.exists(price_path):
+                    processed += process_price_file(chain_code, branch_code, price_path)
+            if promo_file_name:
+                promo_path = os.path.join(download_dir, promo_file_name)
+                if os.path.exists(promo_path):
+                    processed += process_promo_file(chain_code, branch_code, promo_path)
+            total += processed
+            branch_results.append({
+                "branch_code": branch_code,
+                "branch_name": branch_name,
+                "items_processed": processed
+            })
+
+        return jsonify({
+            "status": "success",
+            "chain_code": chain_code,
+            "total_items_processed": total,
+            "branches": branch_results
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)})
+
+@app.route('/food-chains')
+def get_food_chains():
+    """Get all food chains from database"""
+    try:
+        food_chains = db.get_all_food_chains()
+        return jsonify({
+            "status": "success",
+            "food_chains": [
+                {
+                    "code": code,
+                    "name": name,
+                    "url": url
+                }
+                for code, name, url in food_chains
+            ]
+        })
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "error": str(e)
+        })
+
+@app.route('/branches/<chain_code>')
+def get_branches(chain_code):
+    """Get branches for a specific food chain"""
+    try:
+        branches = db.get_branches(chain_code)
+        return jsonify({
+            "status": "success",
+            "chain_code": chain_code,
+            "branches": [
+                {
+                    "code": code,
+                    "name": name,
+                    "price_file": price_file,
+                    "promo_file": promo_file
+                }
+                for code, name, price_file, promo_file in branches
+            ]
+        })
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "error": str(e)
+        })
+
+@app.route('/branch/<chain_code>/<branch_code>')
+def get_branch_details(chain_code, branch_code):
+    """Return branch metadata, products, and promotions for viewer"""
+    try:
+        # Metadata from branches table
+        branches = db.get_branches(chain_code)
+        branch_meta = None
+        for code, name, price_file, promo_file in branches:
+            if code == branch_code:
+                branch_meta = {
+                    "code": code,
+                    "name": name,
+                    "price_file": price_file,
+                    "promo_file": promo_file,
+                }
+                break
+
+        if branch_meta is None:
+            return jsonify({"status": "error", "error": "Branch not found"}), 404
+
+        # Fetch products
+        products_table = f"products_{chain_code}_{branch_code}"
+        products = []
+        try:
+            conn = sqlite3.connect(db.db_path)
+            cur = conn.cursor()
+            cur.execute(f"""
+                SELECT item_code, item_name, manufacturer_name, item_price,
+                       unit_of_measure, quantity, price_update_date
+                FROM {products_table}
+                ORDER BY CAST(item_price AS REAL) DESC
+            """)
+            for row in cur.fetchall():
+                products.append({
+                    "item_code": row[0],
+                    "item_name": row[1],
+                    "manufacturer_name": row[2],
+                    "item_price": row[3],
+                    "unit_of_measure": row[4],
+                    "quantity": row[5],
+                    "price_update_date": row[6],
+                })
+            conn.close()
+        except Exception:
+            products = []
+
+        # Fetch promotions
+        promotions_table = f"promotions_{chain_code}_{branch_code}"
+        promotion_items_table = f"promotion_items_{chain_code}_{branch_code}"
+        promotions = []
+        try:
+            conn = sqlite3.connect(db.db_path)
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            # Join with distinct item counts to avoid relying on stored columns
+            cur.execute(f"""
+                SELECT p.promotion_id,
+                       p.promotion_description,
+                       p.discounted_price,
+                       p.min_quantity,
+                       p.promotion_end_date,
+                       p.promotion_start_date,
+                       p.max_quantity,
+                       p.discounted_price_per_unit,
+                       COALESCE(ic.cnt, 0) AS item_count
+                FROM {promotions_table} p
+                LEFT JOIN (
+                    SELECT promotion_id, COUNT(DISTINCT item_code) AS cnt
+                    FROM {promotion_items_table}
+                    GROUP BY promotion_id
+                ) ic ON ic.promotion_id = p.promotion_id
+                ORDER BY CAST(p.discounted_price AS REAL) DESC
+            """)
+            rows = cur.fetchall()
+            log_message(f"Promotions rows fetched: {len(rows)} from {promotions_table}")
+            for prow in rows:
+                promotion_id = prow["promotion_id"]
+                # Fetch distinct item codes for this promotion
+                cur.execute(f"SELECT DISTINCT item_code FROM {promotion_items_table} WHERE promotion_id = ?", (promotion_id,))
+                item_codes = [r[0] for r in cur.fetchall()]
+                # Promotion data retrieved
+                promotions.append({
+                    "promotion_id": promotion_id,
+                    "promotion_description": prow["promotion_description"],
+                    "discounted_price": prow["discounted_price"],
+                    "min_quantity": prow["min_quantity"],
+                    "promotion_end_date": prow["promotion_end_date"],
+                    "promotion_start_date": prow["promotion_start_date"],
+                    "max_quantity": prow["max_quantity"],
+                    "discounted_price_per_unit": prow["discounted_price_per_unit"],
+                    "item_codes": item_codes,
+                    "item_count": len(item_codes),
+                })
+            conn.close()
+        except Exception as e:
+            log_message(f"Promotions query error: {str(e)}")
+            return jsonify({"status": "error", "error": str(e)})
+
+        return jsonify({
+            "status": "success",
+            "chain_code": chain_code,
+            "branch": branch_meta,
+            "products": products,
+            "promotions": promotions,
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)})
+
+@app.route('/viewer')
+def viewer():
+    """Hierarchical web viewer for the database"""
+    html = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Hierarchical Food Chain Database</title>
+        <style>
+            body { 
+                font-family: Arial, sans-serif; 
+                margin: 0; 
+                padding: 0; 
+                background-color: #f5f5f5; 
+            }
+            .header { 
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
+                color: white; 
+                padding: 20px; 
+                box-shadow: 0 2px 10px rgba(0,0,0,0.1); 
+            }
+            .header h1 { 
+                margin: 0; 
+                font-size: 24px; 
+                display: flex; 
+                align-items: center; 
+            }
+            .header .icon { 
+                font-size: 28px; 
+                margin-right: 10px; 
+            }
+            .nav-path { 
+                font-size: 14px; 
+                opacity: 0.9; 
+                margin-top: 5px; 
+            }
+            .container { 
+                max-width: 1200px; 
+                margin: 0 auto; 
+                padding: 20px; 
+            }
+            .breadcrumbs { 
+                background: white; 
+                padding: 15px; 
+                border-radius: 8px; 
+                margin-bottom: 20px; 
+                box-shadow: 0 2px 5px rgba(0,0,0,0.1); 
+                display: flex; 
+                align-items: center; 
+                justify-content: space-between; 
+            }
+            .breadcrumb-path { 
+                display: flex; 
+                align-items: center; 
+                font-size: 16px; 
+            }
+            .breadcrumb-item { 
+                display: flex; 
+                align-items: center; 
+                margin-right: 10px; 
+            }
+            .breadcrumb-item .icon { 
+                margin-right: 5px; 
+                font-size: 18px; 
+            }
+            .back-btn { 
+                background: #ff6b35; 
+                color: white; 
+                border: none; 
+                padding: 10px 20px; 
+                border-radius: 5px; 
+                cursor: pointer; 
+                font-size: 14px; 
+            }
+            .back-btn:hover { 
+                background: #e55a2b; 
+            }
+            .chain-header { 
+                background: white; 
+                padding: 20px; 
+                border-radius: 8px; 
+                margin-bottom: 20px; 
+                box-shadow: 0 2px 5px rgba(0,0,0,0.1); 
+            }
+            .chain-title { 
+                font-size: 24px; 
+                margin: 0 0 10px 0; 
+                display: flex; 
+                align-items: center; 
+            }
+            .chain-title .icon { 
+                margin-right: 10px; 
+                font-size: 28px; 
+            }
+            .metadata-section { 
+                background: #e8f5e8; 
+                border: 1px solid #4caf50; 
+                border-radius: 8px; 
+                padding: 20px; 
+                margin-bottom: 20px; 
+            }
+            .metadata-title { 
+                font-size: 18px; 
+                font-weight: bold; 
+                margin-bottom: 15px; 
+                display: flex; 
+                align-items: center; 
+            }
+            .metadata-title .icon { 
+                margin-right: 8px; 
+            }
+            .metadata-grid { 
+                display: flex; 
+                flex-direction: column; 
+                gap: 10px; 
+            }
+            .metadata-item { 
+                background: white; 
+                padding: 12px 15px; 
+                border-radius: 5px; 
+                border-left: 4px solid #4caf50; 
+                display: flex; 
+                justify-content: space-between; 
+                align-items: center; 
+            }
+            .metadata-label { 
+                font-weight: bold; 
+                color: #666; 
+                font-size: 14px; 
+                text-transform: uppercase; 
+                min-width: 120px; 
+            }
+            .metadata-value { 
+                font-size: 14px; 
+                color: #333; 
+                text-align: right; 
+                word-break: break-all; 
+            }
+            .branches-section { 
+                background: white; 
+                border-radius: 8px; 
+                padding: 20px; 
+                box-shadow: 0 2px 5px rgba(0,0,0,0.1); 
+            }
+            .branches-title { 
+                font-size: 18px; 
+                font-weight: bold; 
+                margin-bottom: 15px; 
+                display: flex; 
+                align-items: center; 
+            }
+            .branches-title .icon { 
+                margin-right: 8px; 
+            }
+            .branch-item { 
+                background: #f8f9fa; 
+                border: 1px solid #dee2e6; 
+                border-radius: 5px; 
+                padding: 15px; 
+                margin-bottom: 10px; 
+            }
+            .branch-header { 
+                font-weight: bold; 
+                font-size: 16px; 
+                margin-bottom: 8px; 
+                color: #333; 
+            }
+            .branch-details { 
+                display: grid; 
+                grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); 
+                gap: 10px; 
+                font-size: 14px; 
+            }
+            .branch-detail { 
+                color: #666; 
+            }
+            .branch-detail strong { 
+                color: #333; 
+            }
+            .main-index { 
+                background: white; 
+                border-radius: 8px; 
+                padding: 20px; 
+                box-shadow: 0 2px 5px rgba(0,0,0,0.1); 
+            }
+            .main-index h2 { 
+                margin-top: 0; 
+                color: #333; 
+                display: flex; 
+                align-items: center; 
+            }
+            .main-index h2 .icon { 
+                margin-right: 10px; 
+            }
+            .chain-item { 
+                background: #f8f9fa; 
+                border: 1px solid #dee2e6; 
+                border-radius: 5px; 
+                padding: 15px; 
+                margin-bottom: 10px; 
+                cursor: pointer; 
+                transition: all 0.3s ease; 
+            }
+            .chain-item:hover { 
+                background: #e9ecef; 
+                transform: translateY(-2px); 
+                box-shadow: 0 4px 8px rgba(0,0,0,0.1); 
+            }
+            .chain-name { 
+                font-weight: bold; 
+                font-size: 16px; 
+                margin-bottom: 5px; 
+                color: #333; 
+            }
+            .chain-url { 
+                color: #666; 
+                font-size: 14px; 
+                word-break: break-all; 
+            }
+            .phase-controls { 
+                background: white; 
+                border-radius: 8px; 
+                padding: 20px; 
+                margin-bottom: 20px; 
+                box-shadow: 0 2px 5px rgba(0,0,0,0.1); 
+            }
+            .phase-btn { 
+                background: #007bff; 
+                color: white; 
+                border: none; 
+                padding: 12px 20px; 
+                border-radius: 5px; 
+                margin: 5px; 
+                cursor: pointer; 
+                font-size: 14px; 
+                transition: background 0.3s ease; 
+            }
+            .phase-btn:hover { 
+                background: #0056b3; 
+            }
+            .status { 
+                background: white; 
+                border-radius: 8px; 
+                padding: 15px; 
+                margin-bottom: 20px; 
+                box-shadow: 0 2px 5px rgba(0,0,0,0.1); 
+            }
+        </style>
+    </head>
+    <body>
+        <div class="header">
+            <h1>
+                <span class="icon">🏗️</span>
+                Hierarchical Food Chain Database
+            </h1>
+            <div class="nav-path">Navigate: Main Index → Food Chains → Branches → Products</div>
+        </div>
+        
+        <div class="container">
+            <div class="status" id="status">
+                Loading database status...
+            </div>
+            
+            <div class="phase-controls">
+                <button class="phase-btn" onclick="runPhase(1)">Run Phase 1 - Discover Food Chains</button>
+                <button class="phase-btn" onclick="runPhase(2)">Run Phase 2 - Discover Branches</button>
+                <button class="phase-btn" onclick="runPhase(3)">Run Phase 3 - Download Files</button>
+                <button class="phase-btn" onclick="updateFileNames()">Update File Names</button>
+                <button class="phase-btn" onclick="runUpdate()" style="background: #28a745; font-weight: bold;">🔄 Update Database</button>
+                <button class="phase-btn" onclick="loadMainIndex()">Refresh Data</button>
+            </div>
+            
+            <div id="content">
+                Loading content...
+            </div>
+        </div>
+        
+        <script>
+            let currentView = 'main-index';
+            let currentChainCode = null;
+            
+            async function loadStatus() {
+                try {
+                    const response = await fetch('/status');
+                    const status = await response.json();
+                    document.getElementById('status').innerHTML = `
+                        <strong>Database Status:</strong><br>
+                        Exists: ${status.exists}<br>
+                        Food Chains: ${status.food_chains}<br>
+                        Total Branches: ${status.total_branches}
+                    `;
+                } catch (error) {
+                    document.getElementById('status').innerHTML = 'Error loading status: ' + error;
+                }
+            }
+            
+            async function loadMainIndex() {
+                currentView = 'main-index';
+                currentChainCode = null;
+                
+                try {
+                    const response = await fetch('/food-chains');
+                    const data = await response.json();
+                    
+                    let html = `
+                        <div class="breadcrumbs">
+                            <div class="breadcrumb-path">
+                                <div class="breadcrumb-item">
+                                    <span class="icon">🏠</span>
+                                    Main Index
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="main-index">
+                            <h2><span class="icon">🏢</span> Food Chains</h2>
+                    `;
+                    
+                    if (data.food_chains && data.food_chains.length > 0) {
+                        for (const chain of data.food_chains) {
+                            html += `
+                                <div class="chain-item" onclick="loadChainBranches('${chain.code}')">
+                                    <div class="chain-name">${chain.name} (${chain.code})</div>
+                                    <div class="chain-url">${chain.url}</div>
+                                </div>
+                            `;
+                        }
+                    } else {
+                        html += '<p>No food chains found. Run Phase 1 to discover food chains.</p>';
+                    }
+                    
+                    html += '</div>';
+                    document.getElementById('content').innerHTML = html;
+                } catch (error) {
+                    document.getElementById('content').innerHTML = 'Error loading data: ' + error;
+                }
+            }
+            
+            async function loadChainBranches(chainCode) {
+                currentView = 'chain-branches';
+                currentChainCode = chainCode;
+                
+                try {
+                    const [chainsResponse, branchesResponse] = await Promise.all([
+                        fetch('/food-chains'),
+                        fetch(`/branches/${chainCode}`)
+                    ]);
+                    
+                    const chainsData = await chainsResponse.json();
+                    const branchesData = await branchesResponse.json();
+                    
+                    const chain = chainsData.food_chains.find(c => c.code === chainCode);
+                    
+                    let html = `
+                        <div class="breadcrumbs">
+                            <div class="breadcrumb-path">
+                                <div class="breadcrumb-item">
+                                    <span class="icon">🏠</span>
+                                    Main Index
+                                </div>
+                                <span>→</span>
+                                <div class="breadcrumb-item">
+                                    <span class="icon">🏢</span>
+                                    ${chainCode}
+                                </div>
+                            </div>
+                            <button class="back-btn" onclick="loadMainIndex()">← Back to Main Index</button>
+                        </div>
+                        
+                        <div class="chain-header">
+                            <h1 class="chain-title">
+                                <span class="icon">🏢</span>
+                                ${chainCode}: ${chain.name}
+                            </h1>
+                        </div>
+                        
+                        <div class="metadata-section">
+                            <div class="metadata-title">
+                                <span class="icon">🏢</span>
+                                Chain Metadata
+                            </div>
+                            <div class="metadata-grid">
+                                <div class="metadata-item">
+                                    <div class="metadata-label">Chain Name</div>
+                                    <div class="metadata-value">${chain.name}</div>
+                                </div>
+                                <div class="metadata-item">
+                                    <div class="metadata-label">Chain URL</div>
+                                    <div class="metadata-value">${chain.url}</div>
+                                </div>
+                                <div class="metadata-item">
+                                    <div class="metadata-label">Total Branches</div>
+                                    <div class="metadata-value">${branchesData.branches ? branchesData.branches.length : 0}</div>
+                                </div>
+                                <div class="metadata-item">
+                                    <div class="metadata-label">Last Update</div>
+                                    <div class="metadata-value">${new Date().toISOString()}</div>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="branches-section">
+                            <div class="branches-title">
+                                <span class="icon">🏢</span>
+                                Branches
+                            </div>
+                    `;
+                    
+                    if (branchesData.branches && branchesData.branches.length > 0) {
+                        for (const branch of branchesData.branches) {
+                            html += `
+                                <div class="branch-item" onclick="loadBranchDetails('${chainCode}', '${branch.code}')" style="cursor:pointer;">
+                                    <div class="branch-header">Branch ${branch.code}: ${branch.name}</div>
+                                    <div class="branch-details">
+                                        <div class="branch-detail">
+                                            <strong>Price File:</strong> ${branch.price_file || 'N/A'}
+                                        </div>
+                                        <div class="branch-detail">
+                                            <strong>Promo File:</strong> ${branch.promo_file || 'N/A'}
+                                        </div>
+                                    </div>
+                                </div>
+                            `;
+                        }
+                    } else {
+                        html += `
+                            <div style="text-align: center; padding: 40px; color: #666;">
+                                <div style="font-size: 48px; margin-bottom: 20px;">🏢</div>
+                                <h3 style="margin-bottom: 15px; color: #333;">No Branches Available Yet</h3>
+                                <p style="margin-bottom: 25px; font-size: 16px;">
+                                    This food chain hasn't been processed yet. The server needs to discover and populate the branch information.
+                                </p>
+                                <p style="font-size: 14px; color: #888;">
+                                    Run Phase 2 to discover branches for this food chain.
+                                </p>
+                            </div>
+                        `;
+                    }
+                    
+                    html += '</div>';
+                    document.getElementById('content').innerHTML = html;
+                } catch (error) {
+                    document.getElementById('content').innerHTML = `
+                        <div class="breadcrumbs">
+                            <div class="breadcrumb-path">
+                                <div class="breadcrumb-item">
+                                    <span class="icon">🏠</span>
+                                    Main Index
+                                </div>
+                                <span>→</span>
+                                <div class="breadcrumb-item">
+                                    <span class="icon">🏢</span>
+                                    ${chainCode}
+                                </div>
+                            </div>
+                            <button class="back-btn" onclick="loadMainIndex()">← Back to Main Index</button>
+                        </div>
+                        
+                        <div style="text-align: center; padding: 40px; color: #666;">
+                            <div style="font-size: 48px; margin-bottom: 20px;">⚠️</div>
+                            <h3 style="margin-bottom: 15px; color: #333;">Error Loading Chain Data</h3>
+                            <p style="margin-bottom: 25px; font-size: 16px;">
+                                There was an error loading the branch information for this food chain.
+                            </p>
+                            <p style="font-size: 14px; color: #888;">
+                                Error: ${error}
+                            </p>
+                        </div>
+                    `;
+                }
+            }
+
+            async function loadBranchDetails(chainCode, branchCode) {
+                try {
+                    const [chainsResponse, branchResponse] = await Promise.all([
+                        fetch('/food-chains'),
+                        fetch(`/branch/${chainCode}/${branchCode}`)
+                    ]);
+                    const chainsData = await chainsResponse.json();
+                    const branchData = await branchResponse.json();
+                    const chain = chainsData.food_chains.find(c => c.code === chainCode);
+                    const b = branchData.branch || { code: branchCode, name: 'Unknown' };
+
+                    let html = `
+                        <div class="breadcrumbs">
+                            <div class="breadcrumb-path">
+                                <div class="breadcrumb-item"><span class="icon">🏠</span>Main Index</div>
+                                <span>→</span>
+                                <div class="breadcrumb-item"><span class="icon">🏢</span>${chainCode}</div>
+                                <span>→</span>
+                                <div class="breadcrumb-item"><span class="icon">🏬</span>Branch ${b.code}</div>
+                            </div>
+                            <button class="back-btn" onclick="loadChainBranches('${chainCode}')">← Back to ${chainCode}</button>
+                        </div>
+
+                        <div class="chain-header">
+                            <h1 class="chain-title"><span class="icon">🏬</span> Branch ${b.code}: ${b.name}</h1>
+                        </div>
+
+                        <div class="metadata-section">
+                            <div class="metadata-title"><span class="icon">ℹ️</span> Branch Metadata</div>
+                            <div class="metadata-grid">
+                                <div class="metadata-item"><div class="metadata-label">Chain Name</div><div class="metadata-value">${chain.name}</div></div>
+                                <div class="metadata-item"><div class="metadata-label">Chain URL</div><div class="metadata-value">${chain.url}</div></div>
+                                <div class="metadata-item"><div class="metadata-label">Latest Price File</div><div class="metadata-value">${b.price_file || 'N/A'}</div></div>
+                                <div class="metadata-item"><div class="metadata-label">Latest Promo File</div><div class="metadata-value">${b.promo_file || 'N/A'}</div></div>
+                            </div>
+                        </div>
+
+                        <div class="branches-section">
+                            <div class="branches-title"><span class="icon">🧭</span> View</div>
+                            <div style="margin-bottom:15px;">
+                                <button id="tab-products" class="phase-btn" onclick="renderBranchProducts('${chainCode}','${branchCode}')">Products</button>
+                                <button id="tab-promotions" class="phase-btn" onclick="renderBranchPromotions('${chainCode}','${branchCode}')">Promotions</button>
+                            </div>
+                            <div id="branch-content"></div>
+                        </div>
+                    `;
+
+                    document.getElementById('content').innerHTML = html;
+                    window.__branchCache = branchData;
+                    renderBranchProducts(chainCode, branchCode);
+                } catch (error) {
+                    alert('Error loading branch details: ' + error);
+                }
+            }
+
+            function renderBranchProducts(chainCode, branchCode) {
+                const data = window.__branchCache || { products: [] };
+                let inner = '';
+                if (data.products && data.products.length > 0) {
+                    document.getElementById('tab-products').style.background = '#0056b3';
+                    document.getElementById('tab-promotions').style.background = '#007bff';
+                    for (const p of data.products) {
+                        inner += `
+                            <div class="branch-item">
+                                <div class="branch-header">${p.item_name || '(no name)'}</div>
+                                <div class="branch-details">
+                                    <div class="branch-detail"><strong>Code:</strong> ${p.item_code || ''}</div>
+                                    <div class="branch-detail"><strong>Price:</strong> ${p.item_price}</div>
+                                    <div class="branch-detail"><strong>Manufacturer:</strong> ${p.manufacturer_name || 'N/A'}</div>
+                                    <div class="branch-detail"><strong>Unit:</strong> ${p.unit_of_measure || 'N/A'}</div>
+                                    <div class="branch-detail"><strong>Quantity:</strong> ${p.quantity || 'N/A'}</div>
+                                    <div class="branch-detail"><strong>Updated:</strong> ${p.price_update_date || 'N/A'}</div>
+                                </div>
+                            </div>
+                        `;
+                    }
+                } else {
+                    inner = '<p>No products found for this branch.</p>';
+                }
+                document.getElementById('branch-content').innerHTML = inner;
+            }
+
+            function renderBranchPromotions(chainCode, branchCode) {
+                const data = window.__branchCache || { promotions: [] };
+                let inner = '';
+                if (data.promotions && data.promotions.length > 0) {
+                    document.getElementById('tab-products').style.background = '#007bff';
+                    document.getElementById('tab-promotions').style.background = '#0056b3';
+                    for (const pr of data.promotions) {
+                        inner += `
+                            <div class="branch-item">
+                                <div class="branch-header">${pr.promotion_description || 'Promotion'}</div>
+                                <div class="branch-details">
+                                    <div class="branch-detail"><strong>ID:</strong> ${pr.promotion_id || 'N/A'}</div>
+                                    <div class="branch-detail"><strong>Discounted Price:</strong> ${pr.discounted_price || 'N/A'}</div>
+                                    <div class="branch-detail"><strong>Per Unit:</strong> ${pr.discounted_price_per_unit || 'N/A'}</div>
+                                    <div class="branch-detail"><strong>Min Qty:</strong> ${pr.min_quantity || 'N/A'}</div>
+                                    <div class="branch-detail"><strong>Max Qty:</strong> ${pr.max_quantity || 'N/A'}</div>
+                                    <div class="branch-detail"><strong>Start:</strong> ${pr.promotion_start_date || 'N/A'}</div>
+                                    <div class="branch-detail"><strong>End:</strong> ${pr.promotion_end_date || 'N/A'}</div>
+                                    <div class="branch-detail"><strong>Items:</strong> ${pr.item_count || 0}</div>
+                                    <div class="branch-detail" style="grid-column: 1 / -1; word-break: break-all;">
+                                        <strong>Item Codes:</strong> ${(pr.item_codes && pr.item_codes.length ? pr.item_codes.join(', ') : 'N/A')}
+                                    </div>
+                                </div>
+                            </div>
+                        `;
+                    }
+                } else {
+                    inner = '<p>No promotions found for this branch.</p>';
+                }
+                document.getElementById('branch-content').innerHTML = inner;
+            }
+            
+            async function runPhase(phase) {
+                try {
+                    const response = await fetch(`/phase${phase}`);
+                    const result = await response.json();
+                    
+                    if (result.status === 'success') {
+                        alert(`Phase ${phase} completed successfully!`);
+                        loadStatus();
+                        if (currentView === 'main-index') {
+                            loadMainIndex();
+                        } else if (currentView === 'chain-branches' && currentChainCode) {
+                            loadChainBranches(currentChainCode);
+                        }
+                    } else {
+                        alert(`Phase ${phase} failed: ${result.error}`);
+                    }
+                } catch (error) {
+                    alert(`Error running phase ${phase}: ${error}`);
+                }
+            }
+            
+            async function updateFileNames() {
+                try {
+                    const response = await fetch('/update-file-names');
+                    const result = await response.json();
+                    
+                    if (result.status === 'success') {
+                        alert(`File names updated successfully! Total updates: ${result.total_updates}`);
+                        loadStatus();
+                        if (currentView === 'main-index') {
+                            loadMainIndex();
+                        } else if (currentView === 'chain-branches' && currentChainCode) {
+                            loadChainBranches(currentChainCode);
+                        }
+                    } else {
+                        alert(`File name update failed: ${result.error}`);
+                    }
+                } catch (error) {
+                    alert(`Error updating file names: ${error}`);
+                }
+            }
+            
+            async function runUpdate() {
+                try {
+                    const response = await fetch('/update');
+                    const result = await response.json();
+                    
+                    if (result.status === 'success') {
+                        alert(`Database update completed successfully!\\nFile updates: ${result.file_updates}\\nItems processed: ${result.items_processed}`);
+                        loadStatus();
+                        if (currentView === 'main-index') {
+                            loadMainIndex();
+                        } else if (currentView === 'chain-branches' && currentChainCode) {
+                            loadChainBranches(currentChainCode);
+                        }
+                    } else {
+                        alert(`Database update failed: ${result.error}`);
+                    }
+                } catch (error) {
+                    alert(`Error running database update: ${error}`);
+                }
+            }
+            
+            // Load initial data
+            loadStatus();
+            loadMainIndex();
+        </script>
+    </body>
+    </html>
+    """
+    return html
 
 if __name__ == '__main__':
-    log_message("🚀 Starting Flask server...")
-    
-    # Create data directory
+    log_message("🚀 Starting Food Chain Data Server...")
     ensure_data_directory()
-    
-    # Check if database already has data
-    try:
-        conn = sqlite3.connect(db.db_path)
-        cursor = conn.cursor()
-        cursor.execute('SELECT COUNT(*) FROM branches')
-        branch_count = cursor.fetchone()[0]
-        conn.close()
-        
-        if branch_count > 0:
-            log_message(f"✅ Database already contains {branch_count} branches - skipping discovery")
-        else:
-            log_message("🔍 Database empty - running discovery...")
-            discover_and_store_food_chain_data()
-    except:
-        log_message("🔍 Database not found - running discovery...")
-        discover_and_store_food_chain_data()
     
     log_message("🌐 Server will be available at: http://localhost:5000")
     log_message("📋 Available endpoints:")
-    log_message("   - GET /food-chains (all food chains)")
-    log_message("   - GET /get-branches (from database)")
+    log_message("   - GET / (home)")
     log_message("   - GET /status (database status)")
-    log_message("   - GET /process-branch/<code> (download, decompress, parse branch data)")
-    log_message("🔄 Ready to serve food chain information from database!")
+    log_message("   - GET /phase1 (discover food chains)")
+    log_message("   - GET /phase2 (discover branches)")
+    log_message("   - GET /phase3 (download files)")
+    log_message("   - GET /food-chains (all food chains)")
+    log_message("   - GET /branches/<chain_code> (branches for chain)")
+    log_message("   - GET /viewer (web interface)")
+    log_message("🔄 Server ready!")
     
     app.run(host='0.0.0.0', port=5000, debug=False) 

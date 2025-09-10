@@ -125,122 +125,141 @@ class HierarchicalFoodDatabase:
     
     def create_branch_table(self, chain_code, branch_code, branch_name, price_file=None, promo_file=None):
         """Create a branch table with metadata for products"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        # Table name for this branch's products
-        table_name = f"branch_{chain_code}_{branch_code}_products"
-        
-        # Create products table for this branch
-        cursor.execute(f'''
-            CREATE TABLE IF NOT EXISTS {table_name} (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                
-                -- Product identification
-                item_code TEXT NOT NULL,
-                item_name TEXT NOT NULL,
-                manufacturer_name TEXT,
-                
-                -- Pricing information
-                item_price REAL NOT NULL,
-                unit_of_measure TEXT,
-                quantity REAL,
-                
-                -- Metadata
-                price_update_date TIMESTAMP,
-                last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        
-        # Create metadata table for this branch
-        metadata_table = f"{table_name}_metadata"
-        cursor.execute(f'''
-            CREATE TABLE IF NOT EXISTS {metadata_table} (
-                id INTEGER PRIMARY KEY,
-                chain_code TEXT NOT NULL,
-                branch_code TEXT NOT NULL,
-                branch_name TEXT NOT NULL,
-                latest_price_file TEXT DEFAULT '',
-                latest_promo_file TEXT DEFAULT '',
-                total_products INTEGER DEFAULT 0,
-                total_promotions INTEGER DEFAULT 0,
-                last_update TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                notes TEXT DEFAULT ''
-            )
-        ''')
-        
-        # Insert metadata
-        cursor.execute(f'''
-            INSERT OR REPLACE INTO {metadata_table} (
-                id, chain_code, branch_code, branch_name, 
-                latest_price_file, latest_promo_file, last_update
-            ) VALUES (1, ?, ?, ?, ?, ?, ?)
-        ''', (
-            chain_code, branch_code, branch_name,
-            price_file or '', promo_file or '',
-            datetime.now().isoformat()
-        ))
-        
-        # ========================================
-        # CREATE PROMOTIONS TABLE
-        # ========================================
-        promotions_table = f"branch_{chain_code}_{branch_code}_promotions"
-        
-        # Create promotions table for this branch
-        cursor.execute(f'''
-            CREATE TABLE IF NOT EXISTS {promotions_table} (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                
-                -- Promotion identification
-                promotion_id TEXT NOT NULL,
-                promotion_description TEXT NOT NULL,
-                
-                -- Dates and times
-                promotion_update_date TIMESTAMP,
-                promotion_start_date DATE,
-                promotion_start_hour TIME,
-                promotion_end_date DATE,
-                promotion_end_hour TIME,
-                
-                -- Pricing information
-                discounted_price REAL,
-                discounted_price_per_unit REAL,
-                discount_rate REAL,
-                
-                -- Rules and restrictions
-                min_quantity INTEGER,
-                max_quantity INTEGER,
-                min_purchase_amount REAL,
-                allow_multiple_discounts INTEGER,
-                reward_type INTEGER,
-                discount_type INTEGER,
-                
-                -- Additional info
-                remarks TEXT,
-                last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        
-        # Create promotion items table for this branch
-        promotion_items_table = f"branch_{chain_code}_{branch_code}_promotion_items"
-        
-        cursor.execute(f'''
-            CREATE TABLE IF NOT EXISTS {promotion_items_table} (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                promotion_id TEXT NOT NULL,
-                item_code TEXT NOT NULL,
-                is_gift_item INTEGER DEFAULT 0,
-                item_type INTEGER DEFAULT 1,
-                last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                
-                FOREIGN KEY (promotion_id) REFERENCES {promotions_table} (promotion_id)
-            )
-        ''')
-        
-        conn.commit()
-        conn.close()
-        print(f"✅ Created branch tables: {table_name}, {promotions_table}, {promotion_items_table}")
-        return table_name
+        try:
+            print(f"🔍 Debug: Starting create_branch_table for {chain_code}_{branch_code}")
+            
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            # Table name for this branch's products
+            table_name = f"branch_{chain_code}_{branch_code}_products"
+            
+            # Create products table for this branch
+            cursor.execute(f'''
+                CREATE TABLE IF NOT EXISTS {table_name} (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    
+                    -- Product identification
+                    item_code TEXT NOT NULL,
+                    item_name TEXT NOT NULL,
+                    manufacturer_name TEXT,
+                    
+                    -- Pricing information
+                    item_price REAL NOT NULL,
+                    unit_of_measure TEXT,
+                    quantity REAL,
+                    
+                    -- Metadata
+                    price_update_date TIMESTAMP,
+                    last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
+            print(f"🔍 Debug: Created products table {table_name}")
+            
+            # Create metadata table for this branch
+            metadata_table = f"{table_name}_metadata"
+            cursor.execute(f'''
+                CREATE TABLE IF NOT EXISTS {metadata_table} (
+                    id INTEGER PRIMARY KEY,
+                    chain_code TEXT NOT NULL,
+                    branch_code TEXT NOT NULL,
+                    branch_name TEXT NOT NULL,
+                    latest_price_file TEXT DEFAULT '',
+                    latest_promo_file TEXT DEFAULT '',
+                    total_products INTEGER DEFAULT 0,
+                    total_promotions INTEGER DEFAULT 0,
+                    last_update TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    notes TEXT DEFAULT ''
+                )
+            ''')
+            
+            print(f"🔍 Debug: Created metadata table {metadata_table}")
+            
+            # Insert metadata
+            cursor.execute(f'''
+                INSERT OR REPLACE INTO {metadata_table} (
+                    id, chain_code, branch_code, branch_name, 
+                    latest_price_file, latest_promo_file, last_update
+                ) VALUES (1, ?, ?, ?, ?, ?, ?)
+            ''', (
+                chain_code, branch_code, branch_name,
+                price_file or '', promo_file or '',
+                datetime.now().isoformat()
+            ))
+            
+            print(f"🔍 Debug: Inserted metadata")
+            
+            # ========================================
+            # CREATE PROMOTIONS TABLE
+            # ========================================
+            promotions_table = f"branch_{chain_code}_{branch_code}_promotions"
+            
+            # Create promotions table for this branch
+            cursor.execute(f'''
+                CREATE TABLE IF NOT EXISTS {promotions_table} (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    
+                    -- Promotion identification
+                    promotion_id TEXT NOT NULL,
+                    promotion_description TEXT NOT NULL,
+                    
+                    -- Dates and times
+                    promotion_update_date TIMESTAMP,
+                    promotion_start_date DATE,
+                    promotion_start_hour TIME,
+                    promotion_end_date DATE,
+                    promotion_end_hour TIME,
+                    
+                    -- Pricing information
+                    discounted_price REAL,
+                    discounted_price_per_unit REAL,
+                    discount_rate REAL,
+                    
+                    -- Rules and restrictions
+                    min_quantity INTEGER,
+                    max_quantity INTEGER,
+                    min_purchase_amount REAL,
+                    allow_multiple_discounts INTEGER,
+                    reward_type INTEGER,
+                    discount_type INTEGER,
+                    
+                    -- Additional info
+                    remarks TEXT,
+                    last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
+            print(f"🔍 Debug: Created promotions table {promotions_table}")
+            
+            # Create promotion items table for this branch
+            promotion_items_table = f"branch_{chain_code}_{branch_code}_promotion_items"
+            
+            cursor.execute(f'''
+                CREATE TABLE IF NOT EXISTS {promotion_items_table} (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    promotion_id TEXT NOT NULL,
+                    item_code TEXT NOT NULL,
+                    is_gift_item INTEGER DEFAULT 0,
+                    item_type INTEGER DEFAULT 1,
+                    last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    
+                    FOREIGN KEY (promotion_id) REFERENCES {promotions_table} (promotion_id)
+                )
+            ''')
+            
+            print(f"🔍 Debug: Created promotion items table {promotion_items_table}")
+            
+            conn.commit()
+            conn.close()
+            print(f"✅ Created branch tables: {table_name}, {promotions_table}, {promotion_items_table}")
+            return table_name
+            
+        except Exception as e:
+            print(f"❌ Error in create_branch_table for {chain_code}_{branch_code}: {str(e)}")
+            import traceback
+            print(f"❌ Traceback: {traceback.format_exc()}")
+            raise
     
     def add_food_chain(self, chain_code, chain_name, chain_url):
         """Add a food chain to the main index"""
@@ -272,40 +291,58 @@ class HierarchicalFoodDatabase:
     
     def add_branch_to_chain(self, chain_code, branch_code, branch_name, price_file=None, promo_file=None):
         """Add a branch to a food chain"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        # Add to chain's branches table
-        table_name = f"chain_{chain_code}_branches"
-        cursor.execute(f'''
-            INSERT OR REPLACE INTO {table_name} (
-                branch_code, branch_name, price_file_name, promo_file_name, 
-                price_file_date, promo_file_date, last_updated
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
-        ''', (
-            branch_code, branch_name, price_file, promo_file,
-            datetime.now().isoformat(), datetime.now().isoformat(),
-            datetime.now().isoformat()
-        ))
-        
-        # Update branch count in metadata
-        cursor.execute(f'SELECT COUNT(*) FROM {table_name}')
-        total_branches = cursor.fetchone()[0]
-        
-        metadata_table = f"{table_name}_metadata"
-        cursor.execute(f'''
-            UPDATE {metadata_table} 
-            SET total_branches = ?, last_update = ?
-            WHERE id = 1
-        ''', (total_branches, datetime.now().isoformat()))
-        
-        conn.commit()
-        conn.close()
-        
-        # Create the branch products table
-        self.create_branch_table(chain_code, branch_code, branch_name, price_file, promo_file)
-        
-        print(f"✅ Added branch: {branch_name} ({branch_code}) to chain {chain_code}")
+        try:
+            print(f"🔍 Debug: Starting add_branch_to_chain for {branch_code}: {branch_name}")
+            
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            # Add to chain's branches table
+            table_name = f"chain_{chain_code}_branches"
+            print(f"🔍 Debug: Adding to table {table_name}")
+            
+            cursor.execute(f'''
+                INSERT OR REPLACE INTO {table_name} (
+                    branch_code, branch_name, price_file_name, promo_file_name, 
+                    price_file_date, promo_file_date, last_updated
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                branch_code, branch_name, price_file, promo_file,
+                datetime.now().isoformat(), datetime.now().isoformat(),
+                datetime.now().isoformat()
+            ))
+            
+            print(f"🔍 Debug: Inserted into {table_name}")
+            
+            # Update branch count in metadata
+            cursor.execute(f'SELECT COUNT(*) FROM {table_name}')
+            total_branches = cursor.fetchone()[0]
+            
+            metadata_table = f"{table_name}_metadata"
+            cursor.execute(f'''
+                UPDATE {metadata_table} 
+                SET total_branches = ?, last_update = ?
+                WHERE id = 1
+            ''', (total_branches, datetime.now().isoformat()))
+            
+            print(f"🔍 Debug: Updated metadata table {metadata_table}")
+            
+            conn.commit()
+            conn.close()
+            
+            print(f"🔍 Debug: About to call create_branch_table")
+            
+            # Create the branch products table
+            self.create_branch_table(chain_code, branch_code, branch_name, price_file, promo_file)
+            
+            print(f"✅ Added branch: {branch_name} ({branch_code}) to chain {chain_code}")
+            return True
+            
+        except Exception as e:
+            print(f"❌ Error in add_branch_to_chain for {branch_code}: {str(e)}")
+            import traceback
+            print(f"❌ Traceback: {traceback.format_exc()}")
+            return False
     
     def insert_branch_products(self, chain_code, branch_code, products_data):
         """Insert products into a branch table"""
@@ -434,6 +471,45 @@ class HierarchicalFoodDatabase:
         print(f"✅ Inserted {total_promotions} promotions and {total_items} items into {promotions_table}")
         return total_promotions
     
+    def update_branch_file_names(self, chain_code, branch_code, price_file=None, promo_file=None):
+        """Update file names in branch metadata"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        try:
+            # Update the branch products metadata table
+            metadata_table = f"branch_{chain_code}_{branch_code}_products_metadata"
+            cursor.execute(f'''
+                UPDATE {metadata_table} 
+                SET latest_price_file = ?, latest_promo_file = ?, last_update = ?
+                WHERE id = 1
+            ''', (
+                price_file or '', promo_file or '', 
+                datetime.now().isoformat()
+            ))
+            
+            # Also update the chain branches table
+            chain_table = f"chain_{chain_code}_branches"
+            cursor.execute(f'''
+                UPDATE {chain_table} 
+                SET price_file_name = ?, promo_file_name = ?, last_updated = ?
+                WHERE branch_code = ?
+            ''', (
+                price_file or '', promo_file or '',
+                datetime.now().isoformat(), branch_code
+            ))
+            
+            conn.commit()
+            print(f"✅ Updated file names for {chain_code}/{branch_code}")
+            print(f"   Price: {price_file or 'None'}")
+            print(f"   Promo: {promo_file or 'None'}")
+            
+        except Exception as e:
+            print(f"❌ Error updating file names: {str(e)}")
+            conn.rollback()
+        finally:
+            conn.close()
+
     def get_database_overview(self):
         """Get a complete overview of the hierarchical database"""
         conn = sqlite3.connect(self.db_path)
@@ -494,6 +570,23 @@ class HierarchicalFoodDatabase:
         
         conn.close()
         return overview
+
+    def drop_and_recreate_database(self):
+        """Drop and recreate the entire hierarchical database"""
+        import os
+        
+        # Close any existing connections
+        if hasattr(self, 'conn') and self.conn:
+            self.conn.close()
+        
+        # Delete the database file
+        if os.path.exists(self.db_path):
+            os.remove(self.db_path)
+            print(f"🗑️ Deleted existing database: {self.db_path}")
+        
+        # Recreate the database structure
+        self.init_database()
+        print(f"✅ Recreated database structure: {self.db_path}")
 
 # Initialize the hierarchical database
 db = HierarchicalFoodDatabase() 
